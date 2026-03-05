@@ -24,10 +24,11 @@ Then open the URL shown (e.g. http://localhost:5173). Drag to pan, scroll to zoo
 
 1. Push this repo to GitHub.
 2. In the repo: **Settings → Pages**.
-3. Under **Build and deployment**, set **Source** to **GitHub Actions**.
-4. On the next push to `main` (or run the workflow manually under Actions), the site will build and deploy.
+3. Under **Build and deployment**, set **Source** to **GitHub Actions** (not "Deploy from a branch" — that would serve the raw source and break).
+4. Push to `main`/`master` or run the **Deploy to GitHub Pages** workflow from the **Actions** tab.
+5. Open the game at **`https://<username>.github.io/<repo-name>/`** — e.g. `https://redgar72.github.io/web-iso/` (the trailing path is required).
 
-The game will be available at `https://<username>.github.io/<repo-name>/`. The workflow sets the asset base path automatically from the repo name.
+If you see "Loading module ... was blocked because of a disallowed MIME type (text/html)", the wrong thing is being served: either Pages is still set to deploy from a branch (switch to GitHub Actions), or you're opening the root URL instead of `.../web-iso/`.
 
 To build for a custom base path locally (e.g. to test the deployed layout):
 

@@ -1,11 +1,12 @@
 # Build and deploy the game to GitHub Pages.
-# Enable in the repo: Settings → Pages → Source: GitHub Actions.
+# 1. In repo Settings → Pages → Source: choose "GitHub Actions" (not "Deploy from a branch").
+# 2. Open the site at https://<username>.github.io/<repo-name>/ (e.g. .../web-iso/)
 
 name: Deploy to GitHub Pages
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   workflow_dispatch:
 
 permissions:
