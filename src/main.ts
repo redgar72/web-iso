@@ -7,6 +7,15 @@ import { createEnemies, ENEMY_COUNT, ENEMY_SIZE, killEnemyInstance, resurrectEne
 import { createPortal } from './scene/Portal';
 import { rollDrop, type MonsterType, type DropType } from './drops/DropTables';
 import { createPlaceholderCharacter } from './character/loadFbxCharacter';
+import {
+  isSkillUnlocked,
+  addSkillPoint,
+  getSkillPoints,
+  canUnlockSkill,
+  unlockSkill,
+  SKILL_TREE,
+  type SkillId,
+} from './skills/SkillTree';
 
 const container = document.getElementById('app')!;
 let width = container.clientWidth;
@@ -76,6 +85,8 @@ let strength = 10;     // melee damage
 let intelligence = 10;  // magic damage
 let dexterity = 10;     // ranged damage
 let vitality = 10;      // max health
+/** Unspent stat points from level ups (3 per level to allocate to Str/Int/Dex/Vit). */
+let statPointsToAllocate = 0;
 
 function getMaxHealth(): number {
   return Math.round(BASE_MAX_HEALTH * (vitality / 10));
@@ -164,6 +175,10 @@ xpBarWrap.appendChild(xpFill);
 levelXpEl.appendChild(levelLabel);
 levelXpEl.appendChild(xpBarWrap);
 barsEl.appendChild(levelXpEl);
+const skillTreeHintBar = document.createElement('div');
+skillTreeHintBar.textContent = 'Space — Melee  |  K — Skill tree';
+skillTreeHintBar.style.cssText = 'font:10px sans-serif;color:rgba(255,255,255,0.5);margin-top:4px;';
+barsEl.appendChild(skillTreeHintBar);
 
 function updateXpDisplay(): void {
   const needed = getXpForNextLevel();
@@ -216,6 +231,9 @@ function respawn(): void {
 
 respawnBtn.addEventListener('click', respawn);
 
+/** Called when player levels up (e.g. to open skill tree or show notification). */
+const levelUpNotifier: { callback: (() => void) | null } = { callback: null };
+
 // Pause state & overlay
 let isPaused = false;
 const pauseEl = document.createElement('div');
@@ -231,6 +249,129 @@ pauseHint.style.cssText = 'font:14px sans-serif;color:rgba(255,255,255,0.7);';
 pauseEl.appendChild(pauseTitle);
 pauseEl.appendChild(pauseHint);
 container.appendChild(pauseEl);
+
+// Skill tree panel (K to open/close)
+const skillTreeEl = document.createElement('div');
+skillTreeEl.id = 'skill-tree';
+skillTreeEl.style.cssText =
+  'position:absolute;inset:0;z-index:18;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,0.7);backdrop-filter:blur(4px);';
+const skillTreePanel = document.createElement('div');
+skillTreePanel.style.cssText =
+  'background:linear-gradient(180deg,#2a2630 0%,#1e1a24 100%);border:2px solid rgba(255,255,255,0.2);border-radius:12px;padding:24px;min-width:320px;max-width:90vw;box-shadow:0 8px 32px rgba(0,0,0,0.5);';
+const skillTreeTitle = document.createElement('div');
+skillTreeTitle.textContent = 'Skill Tree';
+skillTreeTitle.style.cssText = 'font:20px sans-serif;color:#e8e0e0;font-weight:bold;margin-bottom:8px;';
+const skillTreeStatAllocEl = document.createElement('div');
+skillTreeStatAllocEl.style.cssText = 'margin-bottom:16px;';
+const skillTreePoints = document.createElement('div');
+skillTreePoints.style.cssText = 'font:12px sans-serif;color:#a0c0a0;margin-bottom:16px;';
+const skillTreeList = document.createElement('div');
+skillTreeList.style.cssText = 'display:flex;flex-direction:column;gap:10px;';
+const skillTreeHint = document.createElement('div');
+skillTreeHint.textContent = 'Press K to close';
+skillTreeHint.style.cssText = 'font:11px sans-serif;color:rgba(255,255,255,0.5);margin-top:12px;';
+skillTreePanel.appendChild(skillTreeTitle);
+skillTreePanel.appendChild(skillTreeStatAllocEl);
+skillTreePanel.appendChild(skillTreePoints);
+skillTreePanel.appendChild(skillTreeList);
+skillTreePanel.appendChild(skillTreeHint);
+skillTreeEl.appendChild(skillTreePanel);
+skillTreeEl.style.display = 'none';
+skillTreeEl.style.alignItems = 'center';
+skillTreeEl.style.justifyContent = 'center';
+container.appendChild(skillTreeEl);
+
+let skillTreeOpen = false;
+function setSkillTreeOpen(open: boolean): void {
+  skillTreeOpen = open;
+  skillTreeEl.style.display = open ? 'flex' : 'none';
+  if (open) {
+    setPaused(true);
+    renderSkillTree();
+  } else {
+    setPaused(false);
+  }
+}
+function allocateStat(stat: 'strength' | 'intelligence' | 'dexterity' | 'vitality'): void {
+  if (statPointsToAllocate <= 0) return;
+  statPointsToAllocate--;
+  if (stat === 'strength') strength++;
+  else if (stat === 'intelligence') intelligence++;
+  else if (stat === 'dexterity') dexterity++;
+  else {
+    const oldMax = getMaxHealth();
+    vitality++;
+    health = Math.min(health + (getMaxHealth() - oldMax), getMaxHealth());
+    setHealth(health); // refresh health bar
+  }
+  updateStatsDisplay();
+  renderSkillTree();
+}
+
+function renderSkillTree(): void {
+  // Stat allocation section
+  skillTreeStatAllocEl.innerHTML = '';
+  if (statPointsToAllocate > 0) {
+    const label = document.createElement('div');
+    label.style.cssText = 'font:12px sans-serif;color:#c0a060;margin-bottom:8px;';
+    label.textContent = `Stat points to allocate: ${statPointsToAllocate}`;
+    skillTreeStatAllocEl.appendChild(label);
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;';
+    const btn = (name: string, stat: 'strength' | 'intelligence' | 'dexterity' | 'vitality') => {
+      const b = document.createElement('button');
+      b.textContent = `${name} +1`;
+      b.style.cssText = 'padding:6px 12px;font:12px sans-serif;background:linear-gradient(180deg,#806040,#604030);color:#e8e0d0;border:none;border-radius:6px;cursor:pointer;';
+      b.addEventListener('click', () => allocateStat(stat));
+      return b;
+    };
+    row.appendChild(btn('Str', 'strength'));
+    row.appendChild(btn('Int', 'intelligence'));
+    row.appendChild(btn('Dex', 'dexterity'));
+    row.appendChild(btn('Vit', 'vitality'));
+    skillTreeStatAllocEl.appendChild(row);
+  }
+  skillTreePoints.textContent = `Skill points: ${getSkillPoints()}`;
+  skillTreeList.innerHTML = '';
+  for (const def of SKILL_TREE) {
+    const unlocked = isSkillUnlocked(def.id as SkillId);
+    const canUnlock = canUnlockSkill(def.id as SkillId, level);
+    const row = document.createElement('div');
+    row.style.cssText =
+      'display:flex;flex-direction:column;gap:4px;padding:10px;background:rgba(0,0,0,0.3);border-radius:8px;border:1px solid ' +
+      (unlocked ? 'rgba(80,180,80,0.5)' : canUnlock ? 'rgba(200,180,80,0.5)' : 'rgba(255,255,255,0.1)') +
+      ';';
+    const nameEl = document.createElement('div');
+    nameEl.style.cssText = 'font:14px sans-serif;color:#e0e0e0;font-weight:bold;';
+    nameEl.textContent = def.name + (unlocked ? ' ✓' : '');
+    const descEl = document.createElement('div');
+    descEl.style.cssText = 'font:11px sans-serif;color:rgba(255,255,255,0.75);';
+    descEl.textContent = def.description;
+    const reqEl = document.createElement('div');
+    reqEl.style.cssText = 'font:10px sans-serif;color:rgba(255,255,255,0.5);';
+    reqEl.textContent = `Level ${def.requiredLevel}` + (def.prerequisite ? ` (requires ${SKILL_TREE.find((s) => s.id === def.prerequisite)?.name})` : '');
+    row.appendChild(nameEl);
+    row.appendChild(descEl);
+    row.appendChild(reqEl);
+    if (!unlocked && canUnlock) {
+      const btn = document.createElement('button');
+      btn.textContent = 'Unlock (1 point)';
+      btn.style.cssText =
+        'align-self:flex-start;margin-top:4px;padding:6px 12px;font:12px sans-serif;background:linear-gradient(180deg,#60a060,#408040);color:#fff;border:none;border-radius:6px;cursor:pointer;';
+      btn.addEventListener('click', () => {
+        if (unlockSkill(def.id as SkillId, level)) renderSkillTree();
+      });
+      row.appendChild(btn);
+    }
+    skillTreeList.appendChild(row);
+  }
+}
+skillTreeEl.addEventListener('click', (e) => {
+  if (e.target === skillTreeEl) setSkillTreeOpen(false);
+});
+levelUpNotifier.callback = () => {
+  if (getSkillPoints() > 0 || statPointsToAllocate > 0) setSkillTreeOpen(true);
+};
 
 function setPaused(paused: boolean): void {
   if (isDead) return;
@@ -282,8 +423,11 @@ function addXp(amount: number): void {
     intelligence++;
     dexterity++;
     vitality++;
+    statPointsToAllocate += 3;
+    addSkillPoint();
     setHealth(getMaxHealth()); // heal to new max on level up
     updateStatsDisplay();
+    levelUpNotifier.callback?.();
   }
   updateXpDisplay();
 }
@@ -340,16 +484,21 @@ const swordMesh = (() => {
   return group;
 })();
 swordMesh.position.set(SWORD_ORBIT_RADIUS, 0.6, 0);
+// Blade extends along local +Z; rotate so it points outward along orbit radius (+X) instead of tangent
+swordMesh.rotation.y = Math.PI / 2;
 swordOrbit.add(swordMesh);
+swordOrbit.visible = false; // visible only when Orbiting Sword skill is unlocked
 scene.add(swordOrbit);
 
 const swordWorldPos = new THREE.Vector3();
 const lastSwordHitByEnemy: number[] = Array(ENEMY_COUNT).fill(-999);
+const lastEnemyDamageTime: number[] = Array(ENEMY_COUNT).fill(-999);
 
 // Caster enemies: purple capsules that throw fireballs at the player
 const CASTER_COUNT = 5;
 const CASTER_SPEED = 2.2;
 const CASTER_SIZE = 0.6;
+const CASTER_PREFERRED_RANGE = 10;  // distance from player casters try to maintain (kite range)
 const CASTER_FIREBALL_COOLDOWN = 2.2;
 const ENEMY_FIREBALL_SPEED = 12;
 const ENEMY_FIREBALL_RADIUS = 0.3;
@@ -378,15 +527,13 @@ const MAX_CASTER_HEALTH = 90;
 const casterHealth = Array(CASTER_COUNT).fill(MAX_CASTER_HEALTH);
 const lastCasterResurrectTime: number[] = Array(CASTER_COUNT).fill(-999);
 
-/** Returns true if the caster died. */
+/** Returns true if the caster died. Does not dispose mesh so casters can be reused for next level. */
 function damageCaster(c: number, amount: number): boolean {
   casterHealth[c] = Math.max(0, casterHealth[c] - amount);
   if (casterHealth[c] <= 0) {
     addXp(XP_CASTER);
     trySpawnDrop(casterMeshes[c].position.clone(), 'caster');
     casterGroup.remove(casterMeshes[c]);
-    (casterMeshes[c].geometry as THREE.BufferGeometry).dispose();
-    (casterMeshes[c].material as THREE.Material).dispose();
     casterAlive[c] = false;
     return true;
   }
@@ -534,6 +681,30 @@ const BASE_SWORD_DAMAGE = 12;
 function getMeleeDamage(): number {
   return Math.round(BASE_SWORD_DAMAGE * (strength / 10));
 }
+
+// Player melee attack (Space): instant hit in front, cooldown
+const MELEE_RANGE = 2.0;
+const MELEE_COOLDOWN = 0.55;
+let lastMeleeTime = -999;
+
+function performMeleeAttack(gameTime: number): void {
+  if (gameTime - lastMeleeTime < MELEE_COOLDOWN) return;
+  lastMeleeTime = gameTime;
+  enemyAttackHitEffects.push(createPlayerMeleeEffect(character.position.clone()));
+  const charPos = character.position;
+  for (let j = 0; j < ENEMY_COUNT; j++) {
+    if (!enemyAlive[j]) continue;
+    if (charPos.distanceTo(enemyPositions[j]) <= MELEE_RANGE) {
+      damageRedCube(j, getMeleeDamage());
+    }
+  }
+  for (let c = 0; c < CASTER_COUNT; c++) {
+    if (!casterAlive[c]) continue;
+    if (charPos.distanceTo(casterMeshes[c].position) <= MELEE_RANGE) {
+      damageCaster(c, getMeleeDamage());
+    }
+  }
+}
 function getMagicDamage(): number {
   return Math.round(BASE_FIREBALL_DAMAGE * (intelligence / 10));
 }
@@ -555,12 +726,84 @@ function damageRedCube(j: number, amount: number): boolean {
   return false;
 }
 
-// Enemies chase the character and deal contact damage
+// Enemies move toward the player, stop in range, then explode after a delay (radius damage)
 const ENEMY_SPEED = 3.5;
-const ENEMY_TOUCH_RADIUS = 0.7; // character + enemy overlap
-const ENEMY_DAMAGE = 8;
-const ENEMY_DAMAGE_COOLDOWN = 1; // seconds between damage from same enemy
-const lastEnemyDamageTime: number[] = Array(ENEMY_COUNT).fill(-999);
+const ENEMY_EXPLOSION_RADIUS = 2.2;      // explosion damages player within this radius
+const ENEMY_EXPLOSION_RANGE = ENEMY_EXPLOSION_RADIUS * 0.8; // stop moving when within 80% of attack radius
+const ENEMY_EXPLOSION_DELAY = 0.9;       // seconds standing still before exploding
+const ENEMY_EXPLOSION_COOLDOWN = 1.4;    // seconds after exploding before can charge again
+const ENEMY_DAMAGE = 8;                  // damage when player is in explosion radius
+
+type EnemyExplosionState = 'moving' | 'charging' | 'cooldown';
+const enemyExplosionState: EnemyExplosionState[] = Array(ENEMY_COUNT).fill('moving');
+const enemyExplosionChargeStart: number[] = Array(ENEMY_COUNT).fill(-999);
+const enemyExplosionLastTime: number[] = Array(ENEMY_COUNT).fill(-999);
+
+// Visual effect when a block enemy explodes (expanding ring at explosion center)
+const ENEMY_ATTACK_EFFECT_DURATION = 0.5;
+interface EnemyAttackHitEffect {
+  mesh: THREE.Mesh;
+  spawnTime: number;
+}
+const enemyAttackHitEffects: EnemyAttackHitEffect[] = [];
+const enemyAttackHitGroup = new THREE.Group();
+scene.add(enemyAttackHitGroup);
+
+function createEnemyAttackHitEffect(position: THREE.Vector3): EnemyAttackHitEffect {
+  // Ring size matches ENEMY_EXPLOSION_RADIUS so visual = hit radius
+  const inner = ENEMY_EXPLOSION_RADIUS * 0.25;
+  const outer = ENEMY_EXPLOSION_RADIUS;
+  const geometry = new THREE.RingGeometry(inner, outer, 24);
+  const material = new THREE.MeshBasicMaterial({
+    color: 0xc03030,
+    transparent: true,
+    opacity: 0.9,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+  });
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.position.copy(position);
+  mesh.position.y = 0.5;
+  mesh.rotation.x = -Math.PI / 2;
+  mesh.scale.setScalar(0.2); // starts small, expands to 1 = full hit radius
+  enemyAttackHitGroup.add(mesh);
+  return { mesh, spawnTime: gameTime };
+}
+
+function createPlayerMeleeEffect(position: THREE.Vector3): EnemyAttackHitEffect {
+  const geometry = new THREE.RingGeometry(0.3, 0.9, 24);
+  const material = new THREE.MeshBasicMaterial({
+    color: 0xe8c050,
+    transparent: true,
+    opacity: 0.85,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+  });
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.position.copy(position);
+  mesh.position.y = 0.02;
+  mesh.rotation.x = -Math.PI / 2;
+  enemyAttackHitGroup.add(mesh);
+  return { mesh, spawnTime: gameTime };
+}
+
+function updateEnemyAttackHitEffects(now: number): void {
+  for (let i = enemyAttackHitEffects.length - 1; i >= 0; i--) {
+    const eff = enemyAttackHitEffects[i];
+    const age = now - eff.spawnTime;
+    if (age >= ENEMY_ATTACK_EFFECT_DURATION) {
+      enemyAttackHitGroup.remove(eff.mesh);
+      (eff.mesh.geometry as THREE.BufferGeometry).dispose();
+      (eff.mesh.material as THREE.Material).dispose();
+      enemyAttackHitEffects.splice(i, 1);
+      continue;
+    }
+    const t = age / ENEMY_ATTACK_EFFECT_DURATION;
+    const scale = 0.2 + 0.8 * t; // expand from 20% to 100% of ENEMY_EXPLOSION_RADIUS
+    eff.mesh.scale.setScalar(scale);
+    (eff.mesh.material as THREE.MeshBasicMaterial).opacity = 0.9 * (1 - t);
+  }
+}
 
 // Separation so enemies don't stack
 const ENEMY_SEPARATION_RADIUS = 1.4;
@@ -568,14 +811,78 @@ const ENEMY_SEPARATION_STRENGTH = 2.5;
 const enemyPositions = Array.from({ length: ENEMY_COUNT }, () => new THREE.Vector3());
 const separationVec = new THREE.Vector3();
 
-// Portal spawn: start with all grunts hidden; they spawn from the portal over time
-const SPAWN_INTERVAL = 2.5;
-let nextSpawnTime = 0; // first spawn immediately so cubes appear right away
+// Dungeon level: portal is the exit when all enemies are dead
+const SPAWN_INTERVAL = 3;
+let dungeonLevel = 1;
+/** Grunt slots in play this level (indices 0..levelGruntsCount-1). */
+let levelGruntsCount = 5;
+/** Caster slots in play this level (indices 0..levelCastersCount-1). */
+let levelCastersCount = 0;
 const portalSpawnPos = new THREE.Vector3(PORTAL_POSITION.x, ENEMY_SIZE / 2, PORTAL_POSITION.z);
-for (let j = 0; j < ENEMY_COUNT; j++) {
-  killEnemyInstance(enemies, j);
+const PORTAL_TOUCH_RADIUS = 2.5;
+let nextSpawnTime = 0;
+
+function isAnyEnemyAlive(): boolean {
+  for (let j = 0; j < levelGruntsCount; j++) if (enemyAlive[j]) return true;
+  for (let c = 0; c < levelCastersCount; c++) if (casterAlive[c]) return true;
+  return false;
 }
-enemies.instanceMatrix.needsUpdate = true;
+
+function startDungeonLevel(level: number): void {
+  dungeonLevel = level;
+  if (level === 1) {
+    levelGruntsCount = 5;
+    levelCastersCount = 0;
+    for (let j = 0; j < ENEMY_COUNT; j++) killEnemyInstance(enemies, j);
+    for (let c = 0; c < CASTER_COUNT; c++) {
+      casterGroup.remove(casterMeshes[c]);
+      casterAlive[c] = false;
+    }
+    for (let j = 0; j < levelGruntsCount; j++) {
+      resurrectEnemyInstance(enemies, j, portalSpawnPos);
+      enemyAlive[j] = true;
+      enemyHealth[j] = MAX_ENEMY_HEALTH;
+      enemyPositions[j].copy(portalSpawnPos);
+      lastEnemyDamageTime[j] = -999;
+      lastSwordHitByEnemy[j] = -999;
+      enemyExplosionState[j] = 'moving';
+      enemyExplosionChargeStart[j] = -999;
+      enemyExplosionLastTime[j] = -999;
+    }
+  } else {
+    levelGruntsCount = 5;
+    levelCastersCount = 2;
+    for (let j = 0; j < ENEMY_COUNT; j++) killEnemyInstance(enemies, j);
+    for (let c = 0; c < CASTER_COUNT; c++) {
+      casterGroup.remove(casterMeshes[c]);
+      casterAlive[c] = false;
+    }
+    const casterSpawnPos = new THREE.Vector3(PORTAL_POSITION.x + (Math.random() - 0.5) * 2, CASTER_SIZE / 2, PORTAL_POSITION.z + (Math.random() - 0.5) * 2);
+    for (let j = 0; j < levelGruntsCount; j++) {
+      resurrectEnemyInstance(enemies, j, portalSpawnPos);
+      enemyAlive[j] = true;
+      enemyHealth[j] = MAX_ENEMY_HEALTH;
+      enemyPositions[j].copy(portalSpawnPos);
+      lastEnemyDamageTime[j] = -999;
+      lastSwordHitByEnemy[j] = -999;
+      enemyExplosionState[j] = 'moving';
+      enemyExplosionChargeStart[j] = -999;
+      enemyExplosionLastTime[j] = -999;
+    }
+    for (let c = 0; c < levelCastersCount; c++) {
+      const pos = casterSpawnPos.clone().add(new THREE.Vector3((c - 0.5) * 1.5, 0, 0));
+      casterMeshes[c].position.copy(pos);
+      casterMeshes[c].position.y = CASTER_SIZE / 2;
+      casterGroup.add(casterMeshes[c]);
+      casterAlive[c] = true;
+      casterHealth[c] = MAX_CASTER_HEALTH;
+      lastCasterThrowTime[c] = -999;
+      lastCasterResurrectTime[c] = -999;
+    }
+  }
+  enemies.instanceMatrix.needsUpdate = true;
+  nextSpawnTime = gameTime + SPAWN_INTERVAL;
+}
 
 // Bodies: when red cubes die they leave a corpse that casters can resurrect
 interface Body {
@@ -687,7 +994,7 @@ function createFireballMesh(): THREE.Mesh {
 }
 
 clickOverlay.addEventListener('contextmenu', (e) => {
-  if (isDead || isPaused || mana < FIREBALL_MANA_COST) return;
+  if (isDead || isPaused || !isSkillUnlocked('fireball') || mana < FIREBALL_MANA_COST) return;
   const rect = canvas.getBoundingClientRect();
   pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
   pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
@@ -844,7 +1151,7 @@ function createRockMesh(): THREE.Mesh {
 }
 
 function throwRock(): void {
-  if (mana < THROW_MANA_COST) return;
+  if (!isSkillUnlocked('rock') || mana < THROW_MANA_COST) return;
   raycaster.setFromCamera(pointer, isoCamera.three);
   const hits = raycaster.intersectObject(terrain);
   if (hits.length === 0) return;
@@ -868,11 +1175,21 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'p' || e.key === 'P' || e.key === 'Escape') {
     e.preventDefault();
     if (!isDead) setPaused(!isPaused);
+    if (skillTreeOpen) setSkillTreeOpen(false);
+    return;
+  }
+  if (e.key === 'k' || e.key === 'K') {
+    e.preventDefault();
+    if (!isDead && !isPaused) setSkillTreeOpen(!skillTreeOpen);
     return;
   }
   if (e.key === 'q' || e.key === 'Q') {
     e.preventDefault();
-    if (!isDead && !isPaused) throwRock();
+    if (!isDead && !isPaused && isSkillUnlocked('rock')) throwRock();
+  }
+  if (e.key === ' ') {
+    e.preventDefault();
+    if (!isDead && !isPaused) performMeleeAttack(gameTime);
   }
 });
 
@@ -926,6 +1243,9 @@ function updateRocks(dt: number): void {
 }
 
 function updateSword(dt: number, gameTime: number): void {
+  const hasSword = isSkillUnlocked('sword');
+  swordOrbit.visible = hasSword;
+  if (!hasSword) return;
   swordOrbit.position.copy(character.position);
   swordOrbit.rotation.y += SWORD_ANGULAR_SPEED * dt;
   swordMesh.getWorldPosition(swordWorldPos);
@@ -957,9 +1277,17 @@ function updateCasters(dt: number, gameTime: number): void {
     const dz = charPos.z - pos.z;
     const dist = Math.sqrt(dx * dx + dz * dz);
     if (dist > 0.02) {
-      const move = Math.min(CASTER_SPEED * dt, dist);
-      pos.x += (dx / dist) * move;
-      pos.z += (dz / dist) * move;
+      const targetDist = CASTER_PREFERRED_RANGE;
+      const moveAmount = CASTER_SPEED * dt;
+      if (dist > targetDist) {
+        const move = Math.min(moveAmount, dist - targetDist);
+        pos.x += (dx / dist) * move;
+        pos.z += (dz / dist) * move;
+      } else if (dist < targetDist) {
+        const move = Math.min(moveAmount, targetDist - dist);
+        pos.x -= (dx / dist) * move;
+        pos.z -= (dz / dist) * move;
+      }
     }
     pos.y = CASTER_SIZE / 2;
 
@@ -967,7 +1295,9 @@ function updateCasters(dt: number, gameTime: number): void {
       let nearestIdx = -1;
       let nearestDist = RESURRECT_RANGE;
       for (let b = 0; b < bodies.length; b++) {
-        const d = pos.distanceTo(bodies[b].position);
+        const body = bodies[b];
+        if (body.enemyIndex >= levelGruntsCount) continue; // only resurrect grunts that are in play this level
+        const d = pos.distanceTo(body.position);
         if (d < nearestDist) {
           nearestDist = d;
           nearestIdx = b;
@@ -979,6 +1309,9 @@ function updateCasters(dt: number, gameTime: number): void {
         enemyPositions[body.enemyIndex].copy(body.position);
         enemyHealth[body.enemyIndex] = MAX_ENEMY_HEALTH;
         enemyAlive[body.enemyIndex] = true;
+        enemyExplosionState[body.enemyIndex] = 'moving';
+        enemyExplosionChargeStart[body.enemyIndex] = -999;
+        enemyExplosionLastTime[body.enemyIndex] = -999;
         bodiesGroup.remove(body.mesh);
         (body.mesh.geometry as THREE.BufferGeometry).dispose();
         (body.mesh.material as THREE.Material).dispose();
@@ -1030,7 +1363,7 @@ function updateEnemyFireballs(dt: number): void {
 function updateEnemies(dt: number, gameTime: number): void {
   const charPos = character.position;
 
-  // Pass 1: move each alive enemy toward the character, store new position
+  // Pass 1: move toward character only when outside explosion range and in 'moving' state
   for (let j = 0; j < ENEMY_COUNT; j++) {
     if (!enemyAlive[j]) continue;
     enemies.getMatrixAt(j, enemyMatrix);
@@ -1038,11 +1371,34 @@ function updateEnemies(dt: number, gameTime: number): void {
     const dx = charPos.x - enemyPosition.x;
     const dz = charPos.z - enemyPosition.z;
     const dist = Math.sqrt(dx * dx + dz * dz);
-    if (dist > 0.01) {
-      const move = Math.min(ENEMY_SPEED * dt, dist);
-      enemyPosition.x += (dx / dist) * move;
-      enemyPosition.z += (dz / dist) * move;
+    const inRange = dist <= ENEMY_EXPLOSION_RANGE;
+
+    if (inRange) {
+      if (enemyExplosionState[j] === 'moving') {
+        enemyExplosionState[j] = 'charging';
+        enemyExplosionChargeStart[j] = gameTime;
+      } else if (enemyExplosionState[j] === 'charging') {
+        if (gameTime - enemyExplosionChargeStart[j] >= ENEMY_EXPLOSION_DELAY) {
+          enemyExplosionLastTime[j] = gameTime;
+          enemyExplosionState[j] = 'cooldown';
+          enemyAttackHitEffects.push(createEnemyAttackHitEffect(enemyPositions[j].clone()));
+          if (enemyPositions[j].distanceTo(charPos) <= ENEMY_EXPLOSION_RADIUS) {
+            setHealth(health - ENEMY_DAMAGE);
+          }
+        }
+      } else if (enemyExplosionState[j] === 'cooldown' && gameTime - enemyExplosionLastTime[j] >= ENEMY_EXPLOSION_COOLDOWN) {
+        enemyExplosionState[j] = 'charging';
+        enemyExplosionChargeStart[j] = gameTime;
+      }
+    } else {
+      enemyExplosionState[j] = 'moving';
+      if (dist > 0.01) {
+        const move = Math.min(ENEMY_SPEED * dt, dist);
+        enemyPosition.x += (dx / dist) * move;
+        enemyPosition.z += (dz / dist) * move;
+      }
     }
+
     enemyPosition.y = ENEMY_SIZE / 2;
     enemyPositions[j].copy(enemyPosition);
   }
@@ -1063,18 +1419,13 @@ function updateEnemies(dt: number, gameTime: number): void {
     enemyPositions[j].y = ENEMY_SIZE / 2;
   }
 
-  // Pass 3: write back to matrices and check contact damage
+  // Pass 3: write back to matrices
   for (let j = 0; j < ENEMY_COUNT; j++) {
     if (!enemyAlive[j]) continue;
     enemies.getMatrixAt(j, enemyMatrix);
     enemyMatrix.decompose(enemyPosition, enemyQuat, enemyScale);
     enemyMatrix.compose(enemyPositions[j], enemyQuat, enemyScale);
     enemies.setMatrixAt(j, enemyMatrix);
-
-    if (enemyPositions[j].distanceTo(charPos) < ENEMY_TOUCH_RADIUS && gameTime - lastEnemyDamageTime[j] >= ENEMY_DAMAGE_COOLDOWN) {
-      setHealth(health - ENEMY_DAMAGE);
-      lastEnemyDamageTime[j] = gameTime;
-    }
   }
   enemies.instanceMatrix.needsUpdate = true;
 }
@@ -1082,6 +1433,8 @@ function updateEnemies(dt: number, gameTime: number): void {
 let lastFrameTime = performance.now();
 let smoothedFps = 60;
 let gameTime = 0;
+
+startDungeonLevel(1);
 
 const sizeWarningEl = document.createElement('div');
 sizeWarningEl.style.cssText = 'position:absolute;bottom:10px;left:50%;transform:translateX(-50%);padding:6px 12px;background:rgba(0,0,0,0.8);color:#f88;font:12px sans-serif;border-radius:4px;display:none;z-index:5;pointer-events:none;';
@@ -1097,23 +1450,69 @@ const gameLoop = new GameLoop(
     isoCamera.setWorldFocus(character.position.x, character.position.y, character.position.z);
     if (isDead) return;
     setMana(mana + MANA_REGEN_PER_SECOND * dt);
-    // Spawn an enemy from the portal when the timer is up
+    // Portal: if no enemies alive, touching portal advances to next level
+    if (!isAnyEnemyAlive() && character.position.distanceTo(PORTAL_POSITION) <= PORTAL_TOUCH_RADIUS) {
+      while (enemyFireballs.length > 0) {
+        const ef = enemyFireballs.pop()!;
+        scene.remove(ef.mesh);
+        (ef.mesh.geometry as THREE.BufferGeometry).dispose();
+        (ef.mesh.material as THREE.Material).dispose();
+      }
+      startDungeonLevel(dungeonLevel >= 2 ? 2 : 2); // 1 -> 2, 2 -> 2 (repeat)
+    }
+    // Spawn an enemy from the portal when the timer is up (interval 3s; level 2 uses ratio 5 grunt : 2 caster)
     if (gameTime >= nextSpawnTime) {
       nextSpawnTime = gameTime + SPAWN_INTERVAL;
-      for (let j = 0; j < ENEMY_COUNT; j++) {
-        if (!enemyAlive[j]) {
-          resurrectEnemyInstance(enemies, j, portalSpawnPos);
-          enemyAlive[j] = true;
-          enemyHealth[j] = MAX_ENEMY_HEALTH;
-          enemyPositions[j].copy(portalSpawnPos);
-          lastEnemyDamageTime[j] = -999;
-          lastSwordHitByEnemy[j] = -999;
-          break;
+      if (dungeonLevel === 1) {
+        for (let j = 0; j < levelGruntsCount; j++) {
+          if (!enemyAlive[j]) {
+            resurrectEnemyInstance(enemies, j, portalSpawnPos);
+            enemyAlive[j] = true;
+            enemyHealth[j] = MAX_ENEMY_HEALTH;
+            enemyPositions[j].copy(portalSpawnPos);
+            lastEnemyDamageTime[j] = -999;
+            lastSwordHitByEnemy[j] = -999;
+            enemyExplosionState[j] = 'moving';
+            enemyExplosionChargeStart[j] = -999;
+            enemyExplosionLastTime[j] = -999;
+            break;
+          }
+        }
+      } else {
+        const spawnGrunt = levelGruntsCount > 0 && (levelCastersCount === 0 || Math.random() < levelGruntsCount / (levelGruntsCount + levelCastersCount));
+        if (spawnGrunt) {
+          for (let j = 0; j < levelGruntsCount; j++) {
+            if (!enemyAlive[j]) {
+              resurrectEnemyInstance(enemies, j, portalSpawnPos);
+              enemyAlive[j] = true;
+              enemyHealth[j] = MAX_ENEMY_HEALTH;
+              enemyPositions[j].copy(portalSpawnPos);
+              lastEnemyDamageTime[j] = -999;
+              lastSwordHitByEnemy[j] = -999;
+              enemyExplosionState[j] = 'moving';
+              enemyExplosionChargeStart[j] = -999;
+              enemyExplosionLastTime[j] = -999;
+              break;
+            }
+          }
+        } else {
+          for (let c = 0; c < levelCastersCount; c++) {
+            if (!casterAlive[c]) {
+              casterMeshes[c].position.set(PORTAL_POSITION.x + (Math.random() - 0.5) * 2, CASTER_SIZE / 2, PORTAL_POSITION.z + (Math.random() - 0.5) * 2);
+              casterGroup.add(casterMeshes[c]);
+              casterAlive[c] = true;
+              casterHealth[c] = MAX_CASTER_HEALTH;
+              lastCasterThrowTime[c] = -999;
+              lastCasterResurrectTime[c] = -999;
+              break;
+            }
+          }
         }
       }
     }
     updateCharacterMove(dt);
     updateEnemies(dt, gameTime);
+    updateEnemyAttackHitEffects(gameTime);
     updateCasters(dt, gameTime);
     updateSword(dt, gameTime);
     updateFireballs(dt);
