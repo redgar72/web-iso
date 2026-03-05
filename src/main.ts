@@ -4,17 +4,21 @@ import { GameLoop } from './core/GameLoop';
 import { createIsoTerrain } from './scene/IsoTerrain';
 import { createIsoLights } from './scene/IsoLights';
 import { createEnemies, ENEMY_COUNT, ENEMY_SIZE, killEnemyInstance, resurrectEnemyInstance } from './scene/Enemies';
-import { createPortal } from './scene/Portal';
 import { rollDrop, type MonsterType, type DropType } from './drops/DropTables';
 import { createPlaceholderCharacter } from './character/loadFbxCharacter';
 import {
   isSkillUnlocked,
+  isAugmentUnlocked,
   addSkillPoint,
   getSkillPoints,
   canUnlockSkill,
   unlockSkill,
+  canUnlockAugment,
+  unlockAugment,
+  getAugmentsForSkill,
   SKILL_TREE,
   type SkillId,
+  type AugmentId,
 } from './skills/SkillTree';
 
 const container = document.getElementById('app')!;
@@ -73,12 +77,33 @@ fpsEl.id = 'fps';
 fpsEl.textContent = '— FPS';
 container.appendChild(fpsEl);
 
+// Run timer (resets on respawn; best time persisted for competition)
+const BEST_TIME_KEY = 'web-iso-best-time';
+function formatTime(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+function getBestTime(): number {
+  const raw = localStorage.getItem(BEST_TIME_KEY);
+  if (raw == null) return 0;
+  const n = parseFloat(raw);
+  return Number.isFinite(n) ? n : 0;
+}
+function setBestTime(seconds: number): void {
+  localStorage.setItem(BEST_TIME_KEY, String(seconds));
+}
+let runTime = 0;
+const timerEl = document.createElement('div');
+timerEl.id = 'timer';
+timerEl.textContent = 'Time: 0:00';
+container.appendChild(timerEl);
+
 // Health & Mana bars
 const BASE_MAX_HEALTH = 100;
 const MAX_MANA = 100;
 let mana = MAX_MANA;
 const FIREBALL_MANA_COST = 18;
-const THROW_MANA_COST = 5;
 
 // Character base stats (at 10 = 100% of base)
 let strength = 10;     // melee damage
@@ -179,6 +204,36 @@ const skillTreeHintBar = document.createElement('div');
 skillTreeHintBar.textContent = 'Space — Melee  |  K — Skill tree';
 skillTreeHintBar.style.cssText = 'font:10px sans-serif;color:rgba(255,255,255,0.5);margin-top:4px;';
 barsEl.appendChild(skillTreeHintBar);
+const waveLabelEl = document.createElement('div');
+waveLabelEl.style.cssText = 'font:10px sans-serif;color:rgba(255,255,255,0.6);margin-top:6px;margin-bottom:2px;';
+waveLabelEl.textContent = 'Current wave';
+const waveEl = document.createElement('div');
+waveEl.style.cssText = 'font:14px sans-serif;color:#e8c050;font-weight:bold;';
+waveEl.textContent = '1';
+barsEl.appendChild(waveLabelEl);
+barsEl.appendChild(waveEl);
+
+// Chat section (wave completed messages, etc.)
+const CHAT_MAX_MESSAGES = 50;
+const chatSectionEl = document.createElement('div');
+chatSectionEl.id = 'chat-section';
+const chatTitleEl = document.createElement('div');
+chatTitleEl.className = 'chat-title';
+chatTitleEl.textContent = 'Chat';
+const chatMessagesEl = document.createElement('div');
+chatMessagesEl.id = 'chat-messages';
+chatSectionEl.appendChild(chatTitleEl);
+chatSectionEl.appendChild(chatMessagesEl);
+container.appendChild(chatSectionEl);
+
+function addChatMessage(text: string): void {
+  const msg = document.createElement('div');
+  msg.className = 'chat-msg';
+  msg.textContent = text;
+  chatMessagesEl.appendChild(msg);
+  while (chatMessagesEl.children.length > CHAT_MAX_MESSAGES) chatMessagesEl.removeChild(chatMessagesEl.firstChild!);
+  chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+}
 
 function updateXpDisplay(): void {
   const needed = getXpForNextLevel();
@@ -201,6 +256,10 @@ gameOverEl.style.cssText =
 const gameOverTitle = document.createElement('div');
 gameOverTitle.textContent = 'You died';
 gameOverTitle.style.cssText = 'font:32px sans-serif;color:#e8a0a0;font-weight:bold;text-shadow:0 0 20px rgba(200,80,80,0.5);';
+const gameOverTimeEl = document.createElement('div');
+gameOverTimeEl.style.cssText = 'font:18px sans-serif;color:rgba(255,255,255,0.9);';
+const gameOverBestEl = document.createElement('div');
+gameOverBestEl.style.cssText = 'font:16px sans-serif;color:#a0c0a0;';
 const respawnBtn = document.createElement('button');
 respawnBtn.textContent = 'Respawn';
 respawnBtn.style.cssText =
@@ -212,21 +271,30 @@ respawnBtn.addEventListener('mouseleave', () => {
   respawnBtn.style.background = 'linear-gradient(180deg,#70c0a0,#50a080)';
 });
 gameOverEl.appendChild(gameOverTitle);
+gameOverEl.appendChild(gameOverTimeEl);
+gameOverEl.appendChild(gameOverBestEl);
 gameOverEl.appendChild(respawnBtn);
 container.appendChild(gameOverEl);
 
 function showGameOver(): void {
   isDead = true;
+  const best = getBestTime();
+  const isNewBest = runTime > best;
+  if (isNewBest) setBestTime(runTime);
+  gameOverTimeEl.textContent = `Time: ${formatTime(runTime)}`;
+  gameOverBestEl.textContent = isNewBest ? `New best! ${formatTime(runTime)}` : `Best: ${formatTime(best)}`;
   gameOverEl.style.display = 'flex';
 }
 
 function respawn(): void {
   isDead = false;
+  runTime = 0;
   gameOverEl.style.display = 'none';
   setHealth(getMaxHealth());
   setMana(MAX_MANA);
   character.position.copy(SPAWN_POSITION);
   moveTarget = null;
+  startWave(1);
 }
 
 respawnBtn.addEventListener('click', respawn);
@@ -261,6 +329,8 @@ skillTreePanel.style.cssText =
 const skillTreeTitle = document.createElement('div');
 skillTreeTitle.textContent = 'Skill Tree';
 skillTreeTitle.style.cssText = 'font:20px sans-serif;color:#e8e0e0;font-weight:bold;margin-bottom:8px;';
+const skillTreeTabs = document.createElement('div');
+skillTreeTabs.style.cssText = 'display:flex;gap:8px;margin-bottom:16px;';
 const skillTreeStatAllocEl = document.createElement('div');
 skillTreeStatAllocEl.style.cssText = 'margin-bottom:16px;';
 const skillTreePoints = document.createElement('div');
@@ -271,11 +341,18 @@ const skillTreeHint = document.createElement('div');
 skillTreeHint.textContent = 'Press K to close';
 skillTreeHint.style.cssText = 'font:11px sans-serif;color:rgba(255,255,255,0.5);margin-top:12px;';
 skillTreePanel.appendChild(skillTreeTitle);
+skillTreePanel.appendChild(skillTreeTabs);
 skillTreePanel.appendChild(skillTreeStatAllocEl);
 skillTreePanel.appendChild(skillTreePoints);
 skillTreePanel.appendChild(skillTreeList);
 skillTreePanel.appendChild(skillTreeHint);
 skillTreeEl.appendChild(skillTreePanel);
+
+let skillTreePage: SkillId = 'sword';
+function setSkillTreePage(page: SkillId): void {
+  skillTreePage = page;
+  renderSkillTree();
+}
 skillTreeEl.style.display = 'none';
 skillTreeEl.style.alignItems = 'center';
 skillTreeEl.style.justifyContent = 'center';
@@ -309,6 +386,22 @@ function allocateStat(stat: 'strength' | 'intelligence' | 'dexterity' | 'vitalit
 }
 
 function renderSkillTree(): void {
+  // Tabs: one per skill page
+  skillTreeTabs.innerHTML = '';
+  const tabNames: { id: SkillId; label: string }[] = [
+    { id: 'sword', label: 'Sword' },
+    { id: 'rock', label: 'Rock' },
+    { id: 'fireball', label: 'Fireball' },
+  ];
+  for (const { id, label } of tabNames) {
+    const tab = document.createElement('button');
+    tab.textContent = label;
+    tab.style.cssText =
+      'padding:8px 16px;font:12px sans-serif;border-radius:8px;border:1px solid rgba(255,255,255,0.2);cursor:pointer;background:' +
+      (skillTreePage === id ? 'rgba(100,80,140,0.5);color:#e8e0e0;' : 'rgba(0,0,0,0.3);color:rgba(255,255,255,0.8);');
+    tab.addEventListener('click', () => setSkillTreePage(id));
+    skillTreeTabs.appendChild(tab);
+  }
   // Stat allocation section
   skillTreeStatAllocEl.innerHTML = '';
   if (statPointsToAllocate > 0) {
@@ -333,37 +426,77 @@ function renderSkillTree(): void {
   }
   skillTreePoints.textContent = `Skill points: ${getSkillPoints()}`;
   skillTreeList.innerHTML = '';
-  for (const def of SKILL_TREE) {
-    const unlocked = isSkillUnlocked(def.id as SkillId);
-    const canUnlock = canUnlockSkill(def.id as SkillId, level);
-    const row = document.createElement('div');
-    row.style.cssText =
-      'display:flex;flex-direction:column;gap:4px;padding:10px;background:rgba(0,0,0,0.3);border-radius:8px;border:1px solid ' +
-      (unlocked ? 'rgba(80,180,80,0.5)' : canUnlock ? 'rgba(200,180,80,0.5)' : 'rgba(255,255,255,0.1)') +
-      ';';
-    const nameEl = document.createElement('div');
-    nameEl.style.cssText = 'font:14px sans-serif;color:#e0e0e0;font-weight:bold;';
-    nameEl.textContent = def.name + (unlocked ? ' ✓' : '');
-    const descEl = document.createElement('div');
-    descEl.style.cssText = 'font:11px sans-serif;color:rgba(255,255,255,0.75);';
-    descEl.textContent = def.description;
-    const reqEl = document.createElement('div');
-    reqEl.style.cssText = 'font:10px sans-serif;color:rgba(255,255,255,0.5);';
-    reqEl.textContent = `Level ${def.requiredLevel}` + (def.prerequisite ? ` (requires ${SKILL_TREE.find((s) => s.id === def.prerequisite)?.name})` : '');
-    row.appendChild(nameEl);
-    row.appendChild(descEl);
-    row.appendChild(reqEl);
-    if (!unlocked && canUnlock) {
-      const btn = document.createElement('button');
-      btn.textContent = 'Unlock (1 point)';
-      btn.style.cssText =
-        'align-self:flex-start;margin-top:4px;padding:6px 12px;font:12px sans-serif;background:linear-gradient(180deg,#60a060,#408040);color:#fff;border:none;border-radius:6px;cursor:pointer;';
-      btn.addEventListener('click', () => {
-        if (unlockSkill(def.id as SkillId, level)) renderSkillTree();
-      });
-      row.appendChild(btn);
+
+  const def = SKILL_TREE.find((s) => s.id === skillTreePage)!;
+  const baseUnlocked = isSkillUnlocked(def.id as SkillId);
+  const canUnlockBase = canUnlockSkill(def.id as SkillId, level);
+
+  // Base skill card for this page
+  const baseRow = document.createElement('div');
+  baseRow.style.cssText =
+    'display:flex;flex-direction:column;gap:4px;padding:10px;background:rgba(0,0,0,0.3);border-radius:8px;border:1px solid ' +
+    (baseUnlocked ? 'rgba(80,180,80,0.5)' : canUnlockBase ? 'rgba(200,180,80,0.5)' : 'rgba(255,255,255,0.1)') +
+    ';';
+  const nameEl = document.createElement('div');
+  nameEl.style.cssText = 'font:14px sans-serif;color:#e0e0e0;font-weight:bold;';
+  nameEl.textContent = def.name + (baseUnlocked ? ' ✓' : '');
+  const descEl = document.createElement('div');
+  descEl.style.cssText = 'font:11px sans-serif;color:rgba(255,255,255,0.75);';
+  descEl.textContent = def.description;
+  const reqEl = document.createElement('div');
+  reqEl.style.cssText = 'font:10px sans-serif;color:rgba(255,255,255,0.5);';
+  reqEl.textContent = `Level ${def.requiredLevel}` + (def.prerequisite ? ` (requires ${SKILL_TREE.find((s) => s.id === def.prerequisite)?.name})` : '');
+  baseRow.appendChild(nameEl);
+  baseRow.appendChild(descEl);
+  baseRow.appendChild(reqEl);
+  if (!baseUnlocked && canUnlockBase) {
+    const btn = document.createElement('button');
+    btn.textContent = 'Unlock (1 point)';
+    btn.style.cssText =
+      'align-self:flex-start;margin-top:4px;padding:6px 12px;font:12px sans-serif;background:linear-gradient(180deg,#60a060,#408040);color:#fff;border:none;border-radius:6px;cursor:pointer;';
+    btn.addEventListener('click', () => {
+      if (unlockSkill(def.id as SkillId, level)) renderSkillTree();
+    });
+    baseRow.appendChild(btn);
+  }
+  skillTreeList.appendChild(baseRow);
+
+  // Augments for this skill (only show when base is unlocked)
+  if (baseUnlocked) {
+    const augments = getAugmentsForSkill(skillTreePage);
+    for (const aug of augments) {
+      const unlocked = isAugmentUnlocked(aug.id);
+      const canUnlock = canUnlockAugment(aug.id, level);
+      const row = document.createElement('div');
+      row.style.cssText =
+        'display:flex;flex-direction:column;gap:4px;padding:10px;background:rgba(0,0,0,0.25);border-radius:8px;border:1px solid ' +
+        (unlocked ? 'rgba(80,180,80,0.4)' : canUnlock ? 'rgba(200,180,80,0.4)' : 'rgba(255,255,255,0.08)') +
+        ';margin-left:16px;';
+      const nameEl = document.createElement('div');
+      nameEl.style.cssText = 'font:13px sans-serif;color:#e0e0e0;font-weight:bold;';
+      nameEl.textContent = aug.name + (unlocked ? ' ✓' : '');
+      const descEl = document.createElement('div');
+      descEl.style.cssText = 'font:11px sans-serif;color:rgba(255,255,255,0.7);';
+      descEl.textContent = aug.description;
+      const reqEl = document.createElement('div');
+      reqEl.style.cssText = 'font:10px sans-serif;color:rgba(255,255,255,0.5);';
+      const prereqText = aug.prerequisite ? ` (requires ${augments.find((a) => a.id === aug.prerequisite)?.name})` : '';
+      reqEl.textContent = `Level ${aug.requiredLevel}${prereqText}`;
+      row.appendChild(nameEl);
+      row.appendChild(descEl);
+      row.appendChild(reqEl);
+      if (!unlocked && canUnlock) {
+        const btn = document.createElement('button');
+        btn.textContent = 'Unlock (1 point)';
+        btn.style.cssText =
+          'align-self:flex-start;margin-top:4px;padding:6px 12px;font:12px sans-serif;background:linear-gradient(180deg,#5080a0,#306080);color:#fff;border:none;border-radius:6px;cursor:pointer;';
+        btn.addEventListener('click', () => {
+          if (unlockAugment(aug.id, level)) renderSkillTree();
+        });
+        row.appendChild(btn);
+      }
+      skillTreeList.appendChild(row);
     }
-    skillTreeList.appendChild(row);
   }
 }
 skillTreeEl.addEventListener('click', (e) => {
@@ -448,11 +581,6 @@ scene.add(terrain);
 const enemies = createEnemies();
 scene.add(enemies);
 
-// Portal: enemies spawn here over time instead of starting on the map (visible from spawn)
-const PORTAL_POSITION = new THREE.Vector3(22, 0, 22);
-const portal = createPortal(PORTAL_POSITION.clone());
-scene.add(portal);
-
 createIsoLights(scene);
 
 const character = createPlaceholderCharacter([10, 0, 10]);
@@ -464,8 +592,17 @@ const SWORD_ANGULAR_SPEED = Math.PI * 2; // one full rotation per second
 const SWORD_HIT_RADIUS = 0.6;
 const SWORD_HIT_COOLDOWN = 0.4; // seconds before same enemy can be hit again
 
-const swordOrbit = new THREE.Group();
-const swordMesh = (() => {
+function getSwordOrbitRadius(): number {
+  return isAugmentUnlocked('sword_whirl' as AugmentId) ? SWORD_ORBIT_RADIUS * 1.25 : SWORD_ORBIT_RADIUS;
+}
+function getSwordHitRadius(): number {
+  return isAugmentUnlocked('sword_whirl' as AugmentId) ? SWORD_HIT_RADIUS * 1.2 : SWORD_HIT_RADIUS;
+}
+function getSwordHitCooldown(): number {
+  return isAugmentUnlocked('sword_quickslash' as AugmentId) ? SWORD_HIT_COOLDOWN * 0.6 : SWORD_HIT_COOLDOWN;
+}
+
+function createSwordMesh(): THREE.Group {
   const group = new THREE.Group();
   const blade = new THREE.Mesh(
     new THREE.BoxGeometry(0.08, 0.08, 0.7),
@@ -482,15 +619,26 @@ const swordMesh = (() => {
   group.add(blade);
   group.add(handle);
   return group;
-})();
+}
+
+const swordOrbit = new THREE.Group();
+const swordMesh = createSwordMesh();
 swordMesh.position.set(SWORD_ORBIT_RADIUS, 0.6, 0);
-// Blade extends along local +Z; rotate so it points outward along orbit radius (+X) instead of tangent
 swordMesh.rotation.y = Math.PI / 2;
 swordOrbit.add(swordMesh);
-swordOrbit.visible = false; // visible only when Orbiting Sword skill is unlocked
+swordOrbit.visible = false;
 scene.add(swordOrbit);
 
+const swordOrbit2 = new THREE.Group();
+const swordMesh2 = createSwordMesh();
+swordMesh2.position.set(SWORD_ORBIT_RADIUS, 0.6, 0);
+swordMesh2.rotation.y = Math.PI / 2;
+swordOrbit2.add(swordMesh2);
+swordOrbit2.visible = false;
+scene.add(swordOrbit2);
+
 const swordWorldPos = new THREE.Vector3();
+const swordWorldPos2 = new THREE.Vector3();
 const lastSwordHitByEnemy: number[] = Array(ENEMY_COUNT).fill(-999);
 const lastEnemyDamageTime: number[] = Array(ENEMY_COUNT).fill(-999);
 
@@ -708,8 +856,20 @@ function performMeleeAttack(gameTime: number): void {
 function getMagicDamage(): number {
   return Math.round(BASE_FIREBALL_DAMAGE * (intelligence / 10));
 }
+
+// Ranged weapons: cost ammo (except rock has infinite), damage scaled by dexterity
 function getRangedDamage(): number {
-  return Math.round(BASE_ROCK_DAMAGE * (dexterity / 10));
+  let dmg = Math.round(BASE_ROCK_DAMAGE * (dexterity / 10));
+  if (isAugmentUnlocked('rock_heavy' as AugmentId)) dmg = Math.round(dmg * 1.25);
+  return dmg;
+}
+
+/** Ranged weapon type: thrown = rock (infinite ammo, slow rate); future: bow, gun, etc. */
+type RangedWeaponId = 'rock';
+const RANGED_ROCK_COOLDOWN = 1.2; // slow attack rate for thrown rock
+let lastRangedAttackTime = -999;
+function getRockCooldown(): number {
+  return isAugmentUnlocked('rock_quickdraw' as AugmentId) ? RANGED_ROCK_COOLDOWN * 0.7 : RANGED_ROCK_COOLDOWN;
 }
 
 /** Returns true if the enemy died. */
@@ -811,16 +971,43 @@ const ENEMY_SEPARATION_STRENGTH = 2.5;
 const enemyPositions = Array.from({ length: ENEMY_COUNT }, () => new THREE.Vector3());
 const separationVec = new THREE.Vector3();
 
-// Dungeon level: portal is the exit when all enemies are dead
-const SPAWN_INTERVAL = 3;
-let dungeonLevel = 1;
-/** Grunt slots in play this level (indices 0..levelGruntsCount-1). */
-let levelGruntsCount = 5;
-/** Caster slots in play this level (indices 0..levelCastersCount-1). */
+// Wave structure (Inferno-style): fixed waves, spawn randomly in battlespace, consistent seed
+const WAVE_SEED = 12345;
+const BATTLE_MIN = 6;
+const BATTLE_MAX = 42;
+
+function seededRandom(seed: number): () => number {
+  let s = seed | 0;
+  return () => {
+    s = (s + 0x6d2b79f5) | 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function getWaveSpawnPosition(wave: number, index: number, out: THREE.Vector3): void {
+  const rng = seededRandom(WAVE_SEED + wave * 1000 + index);
+  out.x = BATTLE_MIN + rng() * (BATTLE_MAX - BATTLE_MIN);
+  out.z = BATTLE_MIN + rng() * (BATTLE_MAX - BATTLE_MIN);
+  out.y = 0;
+}
+
+/** Wave 1: 1 cube. Wave 2: 2 cubes. Wave 3: 1 caster. Wave 4: 2 casters. Wave 5+: repeat wave 4. */
+function getWaveComposition(wave: number): { grunts: number; casters: number } {
+  const w = wave <= 4 ? wave : 4;
+  if (w === 1) return { grunts: 1, casters: 0 };
+  if (w === 2) return { grunts: 2, casters: 0 };
+  if (w === 3) return { grunts: 0, casters: 1 };
+  return { grunts: 0, casters: 2 };
+}
+
+let currentWave = 1;
+/** Grunt slots in play this wave (indices 0..levelGruntsCount-1). */
+let levelGruntsCount = 1;
+/** Caster slots in play this wave (indices 0..levelCastersCount-1). */
 let levelCastersCount = 0;
-const portalSpawnPos = new THREE.Vector3(PORTAL_POSITION.x, ENEMY_SIZE / 2, PORTAL_POSITION.z);
-const PORTAL_TOUCH_RADIUS = 2.5;
-let nextSpawnTime = 0;
+const tempSpawnPos = new THREE.Vector3();
 
 function isAnyEnemyAlive(): boolean {
   for (let j = 0; j < levelGruntsCount; j++) if (enemyAlive[j]) return true;
@@ -828,60 +1015,45 @@ function isAnyEnemyAlive(): boolean {
   return false;
 }
 
-function startDungeonLevel(level: number): void {
-  dungeonLevel = level;
-  if (level === 1) {
-    levelGruntsCount = 5;
-    levelCastersCount = 0;
-    for (let j = 0; j < ENEMY_COUNT; j++) killEnemyInstance(enemies, j);
-    for (let c = 0; c < CASTER_COUNT; c++) {
-      casterGroup.remove(casterMeshes[c]);
-      casterAlive[c] = false;
-    }
-    for (let j = 0; j < levelGruntsCount; j++) {
-      resurrectEnemyInstance(enemies, j, portalSpawnPos);
-      enemyAlive[j] = true;
-      enemyHealth[j] = MAX_ENEMY_HEALTH;
-      enemyPositions[j].copy(portalSpawnPos);
-      lastEnemyDamageTime[j] = -999;
-      lastSwordHitByEnemy[j] = -999;
-      enemyExplosionState[j] = 'moving';
-      enemyExplosionChargeStart[j] = -999;
-      enemyExplosionLastTime[j] = -999;
-    }
-  } else {
-    levelGruntsCount = 5;
-    levelCastersCount = 2;
-    for (let j = 0; j < ENEMY_COUNT; j++) killEnemyInstance(enemies, j);
-    for (let c = 0; c < CASTER_COUNT; c++) {
-      casterGroup.remove(casterMeshes[c]);
-      casterAlive[c] = false;
-    }
-    const casterSpawnPos = new THREE.Vector3(PORTAL_POSITION.x + (Math.random() - 0.5) * 2, CASTER_SIZE / 2, PORTAL_POSITION.z + (Math.random() - 0.5) * 2);
-    for (let j = 0; j < levelGruntsCount; j++) {
-      resurrectEnemyInstance(enemies, j, portalSpawnPos);
-      enemyAlive[j] = true;
-      enemyHealth[j] = MAX_ENEMY_HEALTH;
-      enemyPositions[j].copy(portalSpawnPos);
-      lastEnemyDamageTime[j] = -999;
-      lastSwordHitByEnemy[j] = -999;
-      enemyExplosionState[j] = 'moving';
-      enemyExplosionChargeStart[j] = -999;
-      enemyExplosionLastTime[j] = -999;
-    }
-    for (let c = 0; c < levelCastersCount; c++) {
-      const pos = casterSpawnPos.clone().add(new THREE.Vector3((c - 0.5) * 1.5, 0, 0));
-      casterMeshes[c].position.copy(pos);
-      casterMeshes[c].position.y = CASTER_SIZE / 2;
-      casterGroup.add(casterMeshes[c]);
-      casterAlive[c] = true;
-      casterHealth[c] = MAX_CASTER_HEALTH;
-      lastCasterThrowTime[c] = -999;
-      lastCasterResurrectTime[c] = -999;
-    }
+function startWave(wave: number): void {
+  currentWave = wave;
+  const { grunts, casters } = getWaveComposition(wave);
+  levelGruntsCount = grunts;
+  levelCastersCount = casters;
+
+  for (let j = 0; j < ENEMY_COUNT; j++) killEnemyInstance(enemies, j);
+  for (let c = 0; c < CASTER_COUNT; c++) {
+    casterGroup.remove(casterMeshes[c]);
+    casterAlive[c] = false;
   }
+
+  for (let j = 0; j < levelGruntsCount; j++) {
+    getWaveSpawnPosition(wave, j, tempSpawnPos);
+    tempSpawnPos.y = ENEMY_SIZE / 2;
+    resurrectEnemyInstance(enemies, j, tempSpawnPos);
+    enemyAlive[j] = true;
+    enemyHealth[j] = MAX_ENEMY_HEALTH;
+    enemyPositions[j].copy(tempSpawnPos);
+    lastEnemyDamageTime[j] = -999;
+    lastSwordHitByEnemy[j] = -999;
+    enemyExplosionState[j] = 'moving';
+    enemyExplosionChargeStart[j] = -999;
+    enemyExplosionLastTime[j] = -999;
+  }
+
+  for (let c = 0; c < levelCastersCount; c++) {
+    getWaveSpawnPosition(wave, 100 + c, tempSpawnPos);
+    tempSpawnPos.y = CASTER_SIZE / 2;
+    casterMeshes[c].position.copy(tempSpawnPos);
+    casterGroup.add(casterMeshes[c]);
+    casterAlive[c] = true;
+    casterHealth[c] = MAX_CASTER_HEALTH;
+    lastCasterThrowTime[c] = -999;
+    lastCasterResurrectTime[c] = -999;
+  }
+
   enemies.instanceMatrix.needsUpdate = true;
-  nextSpawnTime = gameTime + SPAWN_INTERVAL;
+  waveEl.textContent = String(currentWave);
 }
 
 // Bodies: when red cubes die they leave a corpse that casters can resurrect
@@ -965,8 +1137,12 @@ function updatePickups(dt: number): void {
 }
 
 const EXPLOSION_DURATION = 0.25;
-const EXPLOSION_MAX_SCALE = 7; // doubled from 3.5
-const EXPLOSION_HIT_RADIUS = FIREBALL_RADIUS * EXPLOSION_MAX_SCALE; // damage all enemies in this radius
+const EXPLOSION_MAX_SCALE = 7;
+const EXPLOSION_HIT_RADIUS_BASE = FIREBALL_RADIUS * EXPLOSION_MAX_SCALE;
+const EXPLOSION_HIT_RADIUS_INFERNO = EXPLOSION_HIT_RADIUS_BASE * 1.5; // with Inferno augment
+function getExplosionHitRadius(): number {
+  return isAugmentUnlocked('fireball_radius' as AugmentId) ? EXPLOSION_HIT_RADIUS_INFERNO : EXPLOSION_HIT_RADIUS_BASE;
+}
 
 interface Fireball {
   mesh: THREE.Mesh;
@@ -1046,22 +1222,26 @@ function updateFireballs(dt: number): void {
     fb.ttl -= dt;
     if (fb.mesh.position.y < 0) {
       fb.mesh.position.y = 0;
-      fb.state = 'exploding';
-      fb.velocity.set(0, 0, 0);
-      fb.explosionElapsed = 0;
-      for (let k = 0; k < ENEMY_COUNT; k++) {
-        if (!enemyAlive[k]) continue;
-        enemies.getMatrixAt(k, enemyMatrix);
-        enemyPosition.setFromMatrixPosition(enemyMatrix);
-        if (fb.mesh.position.distanceTo(enemyPosition) <= EXPLOSION_HIT_RADIUS) {
-          damageRedCube(k, getMagicDamage());
+      if (isAugmentUnlocked('fireball_explosion')) {
+        fb.state = 'exploding';
+        fb.velocity.set(0, 0, 0);
+        fb.explosionElapsed = 0;
+        const r = getExplosionHitRadius();
+        for (let k = 0; k < ENEMY_COUNT; k++) {
+          if (!enemyAlive[k]) continue;
+          enemies.getMatrixAt(k, enemyMatrix);
+          enemyPosition.setFromMatrixPosition(enemyMatrix);
+          if (fb.mesh.position.distanceTo(enemyPosition) <= r) damageRedCube(k, getMagicDamage());
         }
-      }
-      for (let c = 0; c < CASTER_COUNT; c++) {
-        if (!casterAlive[c]) continue;
-        if (fb.mesh.position.distanceTo(casterMeshes[c].position) <= EXPLOSION_HIT_RADIUS) {
-          damageCaster(c, getMagicDamage());
+        for (let c = 0; c < CASTER_COUNT; c++) {
+          if (!casterAlive[c]) continue;
+          if (fb.mesh.position.distanceTo(casterMeshes[c].position) <= r) damageCaster(c, getMagicDamage());
         }
+      } else {
+        scene.remove(fb.mesh);
+        (fb.mesh.geometry as THREE.BufferGeometry).dispose();
+        (fb.mesh.material as THREE.Material).dispose();
+        fireballs.splice(i, 1);
       }
       continue;
     }
@@ -1077,23 +1257,28 @@ function updateFireballs(dt: number): void {
       enemies.getMatrixAt(j, enemyMatrix);
       enemyPosition.setFromMatrixPosition(enemyMatrix);
       if (fb.mesh.position.distanceTo(enemyPosition) < hitRadius) {
-        fb.state = 'exploding';
-        fb.velocity.set(0, 0, 0);
-        fb.explosionElapsed = 0;
-        fb.mesh.position.copy(enemyPosition);
-        for (let k = 0; k < ENEMY_COUNT; k++) {
-          if (!enemyAlive[k]) continue;
-          enemies.getMatrixAt(k, enemyMatrix);
-          enemyPosition.setFromMatrixPosition(enemyMatrix);
-          if (fb.mesh.position.distanceTo(enemyPosition) <= EXPLOSION_HIT_RADIUS) {
-            damageRedCube(k, getMagicDamage());
+        if (isAugmentUnlocked('fireball_explosion')) {
+          fb.state = 'exploding';
+          fb.velocity.set(0, 0, 0);
+          fb.explosionElapsed = 0;
+          fb.mesh.position.copy(enemyPosition);
+          const r = getExplosionHitRadius();
+          for (let k = 0; k < ENEMY_COUNT; k++) {
+            if (!enemyAlive[k]) continue;
+            enemies.getMatrixAt(k, enemyMatrix);
+            enemyPosition.setFromMatrixPosition(enemyMatrix);
+            if (fb.mesh.position.distanceTo(enemyPosition) <= r) damageRedCube(k, getMagicDamage());
           }
-        }
-        for (let c = 0; c < CASTER_COUNT; c++) {
-          if (!casterAlive[c]) continue;
-          if (fb.mesh.position.distanceTo(casterMeshes[c].position) <= EXPLOSION_HIT_RADIUS) {
-            damageCaster(c, getMagicDamage());
+          for (let c = 0; c < CASTER_COUNT; c++) {
+            if (!casterAlive[c]) continue;
+            if (fb.mesh.position.distanceTo(casterMeshes[c].position) <= r) damageCaster(c, getMagicDamage());
           }
+        } else {
+          damageRedCube(j, getMagicDamage());
+          scene.remove(fb.mesh);
+          (fb.mesh.geometry as THREE.BufferGeometry).dispose();
+          (fb.mesh.material as THREE.Material).dispose();
+          fireballs.splice(i, 1);
         }
         break;
       }
@@ -1101,23 +1286,28 @@ function updateFireballs(dt: number): void {
     for (let c = 0; c < CASTER_COUNT; c++) {
       if (!casterAlive[c]) continue;
       if (fb.mesh.position.distanceTo(casterMeshes[c].position) < CASTER_SIZE / 2 + FIREBALL_RADIUS) {
-        fb.state = 'exploding';
-        fb.velocity.set(0, 0, 0);
-        fb.explosionElapsed = 0;
-        fb.mesh.position.copy(casterMeshes[c].position);
-        for (let k = 0; k < ENEMY_COUNT; k++) {
-          if (!enemyAlive[k]) continue;
-          enemies.getMatrixAt(k, enemyMatrix);
-          enemyPosition.setFromMatrixPosition(enemyMatrix);
-          if (fb.mesh.position.distanceTo(enemyPosition) <= EXPLOSION_HIT_RADIUS) {
-            damageRedCube(k, getMagicDamage());
+        if (isAugmentUnlocked('fireball_explosion')) {
+          fb.state = 'exploding';
+          fb.velocity.set(0, 0, 0);
+          fb.explosionElapsed = 0;
+          fb.mesh.position.copy(casterMeshes[c].position);
+          const r = getExplosionHitRadius();
+          for (let k = 0; k < ENEMY_COUNT; k++) {
+            if (!enemyAlive[k]) continue;
+            enemies.getMatrixAt(k, enemyMatrix);
+            enemyPosition.setFromMatrixPosition(enemyMatrix);
+            if (fb.mesh.position.distanceTo(enemyPosition) <= r) damageRedCube(k, getMagicDamage());
           }
-        }
-        for (let c2 = 0; c2 < CASTER_COUNT; c2++) {
-          if (!casterAlive[c2]) continue;
-          if (fb.mesh.position.distanceTo(casterMeshes[c2].position) <= EXPLOSION_HIT_RADIUS) {
-            damageCaster(c2, getMagicDamage());
+          for (let c2 = 0; c2 < CASTER_COUNT; c2++) {
+            if (!casterAlive[c2]) continue;
+            if (fb.mesh.position.distanceTo(casterMeshes[c2].position) <= r) damageCaster(c2, getMagicDamage());
           }
+        } else {
+          damageCaster(c, getMagicDamage());
+          scene.remove(fb.mesh);
+          (fb.mesh.geometry as THREE.BufferGeometry).dispose();
+          (fb.mesh.material as THREE.Material).dispose();
+          fireballs.splice(i, 1);
         }
         break;
       }
@@ -1150,25 +1340,43 @@ function createRockMesh(): THREE.Mesh {
   return mesh;
 }
 
-function throwRock(): void {
-  if (!isSkillUnlocked('rock') || mana < THROW_MANA_COST) return;
-  raycaster.setFromCamera(pointer, isoCamera.three);
-  const hits = raycaster.intersectObject(terrain);
-  if (hits.length === 0) return;
-  setMana(mana - THROW_MANA_COST);
-  const target = hits[0].point.clone();
-  target.y = 0;
+function spawnOneRock(origin: THREE.Vector3, target: THREE.Vector3, spreadAngleRad: number): void {
+  let aim = target.clone();
+  if (spreadAngleRad !== 0) {
+    const dir = new THREE.Vector3().subVectors(target, origin).setY(0);
+    if (dir.lengthSq() > 0.01) {
+      dir.normalize();
+      dir.applyAxisAngle(new THREE.Vector3(0, 1, 0), spreadAngleRad);
+      aim = origin.clone().add(dir.multiplyScalar(origin.distanceTo(target)));
+      aim.y = 0;
+    }
+  }
   const mesh = createRockMesh();
-  mesh.position.copy(character.position);
+  mesh.position.copy(origin);
   mesh.position.y = LAUNCH_HEIGHT;
   scene.add(mesh);
   const vel = new THREE.Vector3();
-  getLandingVelocity(character.position, target, ROCK_SPEED, PROJECTILE_GRAVITY, MAX_PROJECTILE_RANGE, vel);
-  rocks.push({
-    mesh,
-    velocity: vel,
-    ttl: ROCK_TTL,
-  });
+  getLandingVelocity(origin, aim, ROCK_SPEED, PROJECTILE_GRAVITY, MAX_PROJECTILE_RANGE, vel);
+  rocks.push({ mesh, velocity: vel, ttl: ROCK_TTL });
+}
+
+function throwRock(gameTime: number): void {
+  if (!isSkillUnlocked('rock')) return;
+  if (gameTime - lastRangedAttackTime < getRockCooldown()) return;
+  lastRangedAttackTime = gameTime;
+  raycaster.setFromCamera(pointer, isoCamera.three);
+  const hits = raycaster.intersectObject(terrain);
+  if (hits.length === 0) return;
+  const target = hits[0].point.clone();
+  target.y = 0;
+  const origin = character.position.clone();
+  const triple = isAugmentUnlocked('rock_triple' as AugmentId);
+  const spread = triple ? 0.15 : 0;
+  spawnOneRock(origin, target, 0);
+  if (triple) {
+    spawnOneRock(origin, target, spread);
+    spawnOneRock(origin, target, -spread);
+  }
 }
 
 document.addEventListener('keydown', (e) => {
@@ -1185,7 +1393,7 @@ document.addEventListener('keydown', (e) => {
   }
   if (e.key === 'q' || e.key === 'Q') {
     e.preventDefault();
-    if (!isDead && !isPaused && isSkillUnlocked('rock')) throwRock();
+    if (!isDead && !isPaused && isSkillUnlocked('rock')) throwRock(gameTime);
   }
   if (e.key === ' ') {
     e.preventDefault();
@@ -1244,28 +1452,44 @@ function updateRocks(dt: number): void {
 
 function updateSword(dt: number, gameTime: number): void {
   const hasSword = isSkillUnlocked('sword');
+  const hasTwin = isAugmentUnlocked('sword_twin' as AugmentId);
   swordOrbit.visible = hasSword;
+  swordOrbit2.visible = hasSword && hasTwin;
   if (!hasSword) return;
+  const orbitR = getSwordOrbitRadius();
+  const hitR = getSwordHitRadius();
+  const hitCooldown = getSwordHitCooldown();
+  swordMesh.position.x = orbitR;
   swordOrbit.position.copy(character.position);
   swordOrbit.rotation.y += SWORD_ANGULAR_SPEED * dt;
   swordMesh.getWorldPosition(swordWorldPos);
-  const hitDist = ENEMY_SIZE / 2 + SWORD_HIT_RADIUS;
-  for (let j = 0; j < ENEMY_COUNT; j++) {
-    if (!enemyAlive[j]) continue;
-    if (gameTime - lastSwordHitByEnemy[j] < SWORD_HIT_COOLDOWN) continue;
-    enemies.getMatrixAt(j, enemyMatrix);
-    enemyPosition.setFromMatrixPosition(enemyMatrix);
-    if (swordWorldPos.distanceTo(enemyPosition) < hitDist) {
-      damageRedCube(j, getMeleeDamage());
-      lastSwordHitByEnemy[j] = gameTime;
-    }
+  if (hasTwin) {
+    swordMesh2.position.x = orbitR;
+    swordOrbit2.position.copy(character.position);
+    swordOrbit2.rotation.y -= SWORD_ANGULAR_SPEED * dt;
+    swordMesh2.getWorldPosition(swordWorldPos2);
   }
-  for (let c = 0; c < CASTER_COUNT; c++) {
-    if (!casterAlive[c]) continue;
-    if (swordWorldPos.distanceTo(casterMeshes[c].position) < CASTER_SIZE / 2 + SWORD_HIT_RADIUS) {
-      damageCaster(c, getMeleeDamage());
+  const hitDist = ENEMY_SIZE / 2 + hitR;
+  const checkHit = (worldPos: THREE.Vector3) => {
+    for (let j = 0; j < ENEMY_COUNT; j++) {
+      if (!enemyAlive[j]) continue;
+      if (gameTime - lastSwordHitByEnemy[j] < hitCooldown) continue;
+      enemies.getMatrixAt(j, enemyMatrix);
+      enemyPosition.setFromMatrixPosition(enemyMatrix);
+      if (worldPos.distanceTo(enemyPosition) < hitDist) {
+        damageRedCube(j, getMeleeDamage());
+        lastSwordHitByEnemy[j] = gameTime;
+      }
     }
-  }
+    for (let c = 0; c < CASTER_COUNT; c++) {
+      if (!casterAlive[c]) continue;
+      if (worldPos.distanceTo(casterMeshes[c].position) < CASTER_SIZE / 2 + hitR) {
+        damageCaster(c, getMeleeDamage());
+      }
+    }
+  };
+  checkHit(swordWorldPos);
+  if (hasTwin) checkHit(swordWorldPos2);
 }
 
 function updateCasters(dt: number, gameTime: number): void {
@@ -1434,7 +1658,7 @@ let lastFrameTime = performance.now();
 let smoothedFps = 60;
 let gameTime = 0;
 
-startDungeonLevel(1);
+startWave(1);
 
 const sizeWarningEl = document.createElement('div');
 sizeWarningEl.style.cssText = 'position:absolute;bottom:10px;left:50%;transform:translateX(-50%);padding:6px 12px;background:rgba(0,0,0,0.8);color:#f88;font:12px sans-serif;border-radius:4px;display:none;z-index:5;pointer-events:none;';
@@ -1447,68 +1671,20 @@ const gameLoop = new GameLoop(
   (dt) => {
     if (isPaused) return;
     gameTime += dt;
+    if (!isDead) runTime += dt;
     isoCamera.setWorldFocus(character.position.x, character.position.y, character.position.z);
     if (isDead) return;
     setMana(mana + MANA_REGEN_PER_SECOND * dt);
-    // Portal: if no enemies alive, touching portal advances to next level
-    if (!isAnyEnemyAlive() && character.position.distanceTo(PORTAL_POSITION) <= PORTAL_TOUCH_RADIUS) {
+    // Inferno-style: when all enemies dead, advance to next wave (no portal)
+    if (!isAnyEnemyAlive()) {
+      addChatMessage(`Wave ${currentWave} completed!`);
       while (enemyFireballs.length > 0) {
         const ef = enemyFireballs.pop()!;
         scene.remove(ef.mesh);
         (ef.mesh.geometry as THREE.BufferGeometry).dispose();
         (ef.mesh.material as THREE.Material).dispose();
       }
-      startDungeonLevel(dungeonLevel >= 2 ? 2 : 2); // 1 -> 2, 2 -> 2 (repeat)
-    }
-    // Spawn an enemy from the portal when the timer is up (interval 3s; level 2 uses ratio 5 grunt : 2 caster)
-    if (gameTime >= nextSpawnTime) {
-      nextSpawnTime = gameTime + SPAWN_INTERVAL;
-      if (dungeonLevel === 1) {
-        for (let j = 0; j < levelGruntsCount; j++) {
-          if (!enemyAlive[j]) {
-            resurrectEnemyInstance(enemies, j, portalSpawnPos);
-            enemyAlive[j] = true;
-            enemyHealth[j] = MAX_ENEMY_HEALTH;
-            enemyPositions[j].copy(portalSpawnPos);
-            lastEnemyDamageTime[j] = -999;
-            lastSwordHitByEnemy[j] = -999;
-            enemyExplosionState[j] = 'moving';
-            enemyExplosionChargeStart[j] = -999;
-            enemyExplosionLastTime[j] = -999;
-            break;
-          }
-        }
-      } else {
-        const spawnGrunt = levelGruntsCount > 0 && (levelCastersCount === 0 || Math.random() < levelGruntsCount / (levelGruntsCount + levelCastersCount));
-        if (spawnGrunt) {
-          for (let j = 0; j < levelGruntsCount; j++) {
-            if (!enemyAlive[j]) {
-              resurrectEnemyInstance(enemies, j, portalSpawnPos);
-              enemyAlive[j] = true;
-              enemyHealth[j] = MAX_ENEMY_HEALTH;
-              enemyPositions[j].copy(portalSpawnPos);
-              lastEnemyDamageTime[j] = -999;
-              lastSwordHitByEnemy[j] = -999;
-              enemyExplosionState[j] = 'moving';
-              enemyExplosionChargeStart[j] = -999;
-              enemyExplosionLastTime[j] = -999;
-              break;
-            }
-          }
-        } else {
-          for (let c = 0; c < levelCastersCount; c++) {
-            if (!casterAlive[c]) {
-              casterMeshes[c].position.set(PORTAL_POSITION.x + (Math.random() - 0.5) * 2, CASTER_SIZE / 2, PORTAL_POSITION.z + (Math.random() - 0.5) * 2);
-              casterGroup.add(casterMeshes[c]);
-              casterAlive[c] = true;
-              casterHealth[c] = MAX_CASTER_HEALTH;
-              lastCasterThrowTime[c] = -999;
-              lastCasterResurrectTime[c] = -999;
-              break;
-            }
-          }
-        }
-      }
+      startWave(currentWave + 1);
     }
     updateCharacterMove(dt);
     updateEnemies(dt, gameTime);
@@ -1538,6 +1714,7 @@ const gameLoop = new GameLoop(
       smoothedFps += (instant - smoothedFps) * 0.08;
       fpsEl.textContent = `${Math.round(smoothedFps)} FPS`;
     }
+    timerEl.textContent = `Time: ${formatTime(runTime)}`;
     const camera = isoCamera.three;
     for (let j = 0; j < ENEMY_COUNT; j++) {
       const bar = enemyHealthBarEls[j];
