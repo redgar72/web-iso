@@ -17,10 +17,10 @@ type ObjectWithAnimations = THREE.Object3D & { animations?: THREE.AnimationClip[
 /** Collect animation clip names from the root and any descendant (FBXLoader may attach to root or a child). */
 function getAnimationNamesFromGroup(group: THREE.Object3D): string[] {
   const seen = new Set<string>();
-  group.traverse((obj) => {
+  group.traverse((obj: THREE.Object3D) => {
     const clips = (obj as ObjectWithAnimations).animations;
     if (clips?.length) {
-      clips.forEach((c) => seen.add(c.name));
+      clips.forEach((c: THREE.AnimationClip) => seen.add(c.name));
     }
   });
   return Array.from(seen);
@@ -45,13 +45,13 @@ export function loadFbxCharacter(
   return new Promise((resolve) => {
     loader.load(
       url,
-      (group) => {
+      (group: THREE.Group) => {
         group.scale.setScalar(scale);
         // Put feet on the ground: FBX origin may be at center or base
         const box = new THREE.Box3().setFromObject(group);
         const minY = box.min.y;
         group.position.set(position[0], position[1] - minY * scale, position[2]);
-        group.traverse((child) => {
+        group.traverse((child: THREE.Object3D) => {
           if (child instanceof THREE.Mesh) {
             if (shadows) {
               child.castShadow = true;

@@ -1,0 +1,1 @@
+{"root":["./src/main.ts","./src/character/loadfbxcharacter.ts","./src/core/gameloop.ts","./src/core/isocamera.ts","./src/drops/droptables.ts","./src/scene/enemies.ts","./src/scene/isolights.ts","./src/scene/isoterrain.ts","./src/scene/portal.ts"],"version":"5.7.3"}

@@ -12,6 +12,7 @@
     "three": "^0.170.0"
   },
   "devDependencies": {
+    "@types/three": "^0.169.0",
     "typescript": "~5.7.2",
     "vite": "^6.0.1"
   }

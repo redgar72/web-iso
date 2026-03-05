@@ -45,7 +45,7 @@ contextLostEl.textContent = 'Graphics reset — reloading…';
 contextLostEl.style.cssText = 'position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:#1a1820;color:#ccc;font:18px sans-serif;z-index:10;pointer-events:none;';
 container.appendChild(contextLostEl);
 
-canvas.addEventListener('webglcontextlost', (e) => {
+canvas.addEventListener('webglcontextlost', (e: Event) => {
   e.preventDefault();
   glContextLost = true;
   contextLostEl.style.display = 'flex';
