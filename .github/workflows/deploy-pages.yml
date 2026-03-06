@@ -36,7 +36,9 @@ jobs:
       - name: Build
         run: npm run build
         env:
-          VITE_BASE_PATH: /${{ github.event.repository.name }}/
+          # Use root path for custom domain support (play.lilee.io)
+          # This also works for GitHub Pages URL via redirects
+          VITE_BASE_PATH: /
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
