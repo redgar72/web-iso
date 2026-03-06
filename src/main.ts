@@ -122,6 +122,7 @@ let level = 1;
 let xp = 0;
 const XP_RED_CUBE = 12;
 const XP_CASTER = 35;
+const XP_RESURRECTOR = 40;
 
 function getXpForNextLevel(): number {
   return 80 * level; // e.g. 80 to reach 2, 160 to reach 3
@@ -386,6 +387,7 @@ function allocateStat(stat: 'strength' | 'intelligence' | 'dexterity' | 'vitalit
 }
 
 function renderSkillTree(): void {
+  skillTreeTitle.textContent = `Skill Tree — Level ${level}`;
   // Tabs: one per skill page
   skillTreeTabs.innerHTML = '';
   const tabNames: { id: SkillId; label: string }[] = [
@@ -411,10 +413,17 @@ function renderSkillTree(): void {
     skillTreeStatAllocEl.appendChild(label);
     const row = document.createElement('div');
     row.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;';
+    const statColors: Record<'strength' | 'intelligence' | 'dexterity' | 'vitality', { top: string; bottom: string; text: string }> = {
+      strength: { top: '#d4af37', bottom: '#b8860b', text: '#2a2200' },
+      intelligence: { top: '#7dd3fc', bottom: '#38bdf8', text: '#0c1929' },
+      dexterity: { top: '#4ade80', bottom: '#22c55e', text: '#052e16' },
+      vitality: { top: '#f87171', bottom: '#dc2626', text: '#450a0a' },
+    };
     const btn = (name: string, stat: 'strength' | 'intelligence' | 'dexterity' | 'vitality') => {
+      const c = statColors[stat];
       const b = document.createElement('button');
       b.textContent = `${name} +1`;
-      b.style.cssText = 'padding:6px 12px;font:12px sans-serif;background:linear-gradient(180deg,#806040,#604030);color:#e8e0d0;border:none;border-radius:6px;cursor:pointer;';
+      b.style.cssText = `padding:6px 12px;font:12px sans-serif;background:linear-gradient(180deg,${c.top},${c.bottom});color:${c.text};border:none;border-radius:6px;cursor:pointer;`;
       b.addEventListener('click', () => allocateStat(stat));
       return b;
     };
@@ -519,6 +528,7 @@ const ENEMY_HEALTH_BAR_WIDTH = 36;
 const ENEMY_HEALTH_BAR_HEIGHT = 5;
 const enemyHealthBarEls: { wrap: HTMLDivElement; fill: HTMLDivElement }[] = [];
 const casterHealthBarEls: { wrap: HTMLDivElement; fill: HTMLDivElement }[] = [];
+const resurrectorHealthBarEls: { wrap: HTMLDivElement; fill: HTMLDivElement }[] = [];
 const healthBarProjectionVec = new THREE.Vector3();
 const HEALTH_BAR_Y_OFFSET = 1.2;
 
@@ -696,6 +706,54 @@ for (let c = 0; c < CASTER_COUNT; c++) {
 }
 scene.add(casterGroup);
 
+// Resurrector enemies: dark teal capsules that resurrect fallen grunts (spawn from wave 5, after double casters)
+const RESURRECTOR_COUNT = 3;
+const RESURRECTOR_SPEED = 1.8;
+const RESURRECTOR_SIZE = 0.55;
+const RESURRECTOR_PREFERRED_RANGE = 8;
+
+const resurrectorGroup = new THREE.Group();
+const resurrectorMeshes: THREE.Mesh[] = [];
+const resurrectorAlive: boolean[] = [];
+const lastResurrectorResurrectTime: number[] = [];
+
+for (let i = 0; i < RESURRECTOR_COUNT; i++) {
+  const mesh = new THREE.Mesh(
+    new THREE.ConeGeometry(RESURRECTOR_SIZE * 0.55, RESURRECTOR_SIZE * 1.2, 6),
+    new THREE.MeshStandardMaterial({ color: 0x2d5a4a, roughness: 0.7, metalness: 0.05, emissive: 0x0a2018 })
+  );
+  mesh.position.set(8 + Math.random() * 16, RESURRECTOR_SIZE / 2, 8 + Math.random() * 16);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  resurrectorGroup.add(mesh);
+  resurrectorMeshes.push(mesh);
+  resurrectorAlive.push(false);
+  lastResurrectorResurrectTime.push(-999);
+}
+const MAX_RESURRECTOR_HEALTH = 70;
+const resurrectorHealth = Array(RESURRECTOR_COUNT).fill(MAX_RESURRECTOR_HEALTH);
+
+/** Returns true if the resurrector died. */
+function damageResurrector(r: number, amount: number): boolean {
+  resurrectorHealth[r] = Math.max(0, resurrectorHealth[r] - amount);
+  if (resurrectorHealth[r] <= 0) {
+    addXp(XP_RESURRECTOR);
+    trySpawnDrop(resurrectorMeshes[r].position.clone(), 'resurrector');
+    resurrectorGroup.remove(resurrectorMeshes[r]);
+    resurrectorAlive[r] = false;
+    return true;
+  }
+  return false;
+}
+
+for (let r = 0; r < RESURRECTOR_COUNT; r++) {
+  const bar = createEnemyHealthBar();
+  bar.fill.style.background = 'linear-gradient(90deg,#2d5a4a,#4a7a6a)';
+  enemyHealthBarsContainer.appendChild(bar.wrap);
+  resurrectorHealthBarEls.push(bar);
+}
+scene.add(resurrectorGroup);
+
 interface EnemyFireball {
   mesh: THREE.Mesh;
   velocity: THREE.Vector3;
@@ -852,6 +910,12 @@ function performMeleeAttack(gameTime: number): void {
       damageCaster(c, getMeleeDamage());
     }
   }
+  for (let r = 0; r < RESURRECTOR_COUNT; r++) {
+    if (!resurrectorAlive[r]) continue;
+    if (charPos.distanceTo(resurrectorMeshes[r].position) <= MELEE_RANGE) {
+      damageResurrector(r, getMeleeDamage());
+    }
+  }
 }
 function getMagicDamage(): number {
   return Math.round(BASE_FIREBALL_DAMAGE * (intelligence / 10));
@@ -993,13 +1057,17 @@ function getWaveSpawnPosition(wave: number, index: number, out: THREE.Vector3): 
   out.y = 0;
 }
 
-/** Wave 1: 1 cube. Wave 2: 2 cubes. Wave 3: 1 caster. Wave 4: 2 casters. Wave 5+: repeat wave 4. */
-function getWaveComposition(wave: number): { grunts: number; casters: number } {
-  const w = wave <= 4 ? wave : 4;
-  if (w === 1) return { grunts: 1, casters: 0 };
-  if (w === 2) return { grunts: 2, casters: 0 };
-  if (w === 3) return { grunts: 0, casters: 1 };
-  return { grunts: 0, casters: 2 };
+/** Wave 1: 1 cube. Wave 2: 2 cubes. Wave 3: 1 caster. Wave 4: 2 casters. Wave 5+: grunts + 2 casters + resurrector(s) so resurrector has bodies to raise. */
+function getWaveComposition(wave: number): { grunts: number; casters: number; resurrectors: number } {
+  if (wave >= 5) {
+    const resurrectorCount = Math.min(1 + Math.floor((wave - 5) / 2), RESURRECTOR_COUNT);
+    const grunts = Math.min(1 + (wave - 5), 4); // 1 grunt wave 5, 2 wave 6, etc., cap 4
+    return { grunts, casters: 2, resurrectors: resurrectorCount };
+  }
+  if (wave === 1) return { grunts: 1, casters: 0, resurrectors: 0 };
+  if (wave === 2) return { grunts: 2, casters: 0, resurrectors: 0 };
+  if (wave === 3) return { grunts: 0, casters: 1, resurrectors: 0 };
+  return { grunts: 0, casters: 2, resurrectors: 0 }; // wave 4
 }
 
 let currentWave = 1;
@@ -1007,24 +1075,32 @@ let currentWave = 1;
 let levelGruntsCount = 1;
 /** Caster slots in play this wave (indices 0..levelCastersCount-1). */
 let levelCastersCount = 0;
+/** Resurrector slots in play this wave (indices 0..levelResurrectorsCount-1). */
+let levelResurrectorsCount = 0;
 const tempSpawnPos = new THREE.Vector3();
 
 function isAnyEnemyAlive(): boolean {
   for (let j = 0; j < levelGruntsCount; j++) if (enemyAlive[j]) return true;
   for (let c = 0; c < levelCastersCount; c++) if (casterAlive[c]) return true;
+  for (let r = 0; r < levelResurrectorsCount; r++) if (resurrectorAlive[r]) return true;
   return false;
 }
 
 function startWave(wave: number): void {
   currentWave = wave;
-  const { grunts, casters } = getWaveComposition(wave);
+  const { grunts, casters, resurrectors } = getWaveComposition(wave);
   levelGruntsCount = grunts;
   levelCastersCount = casters;
+  levelResurrectorsCount = resurrectors;
 
   for (let j = 0; j < ENEMY_COUNT; j++) killEnemyInstance(enemies, j);
   for (let c = 0; c < CASTER_COUNT; c++) {
     casterGroup.remove(casterMeshes[c]);
     casterAlive[c] = false;
+  }
+  for (let r = 0; r < RESURRECTOR_COUNT; r++) {
+    resurrectorGroup.remove(resurrectorMeshes[r]);
+    resurrectorAlive[r] = false;
   }
 
   for (let j = 0; j < levelGruntsCount; j++) {
@@ -1050,6 +1126,16 @@ function startWave(wave: number): void {
     casterHealth[c] = MAX_CASTER_HEALTH;
     lastCasterThrowTime[c] = -999;
     lastCasterResurrectTime[c] = -999;
+  }
+
+  for (let r = 0; r < levelResurrectorsCount; r++) {
+    getWaveSpawnPosition(wave, 200 + r, tempSpawnPos);
+    tempSpawnPos.y = RESURRECTOR_SIZE / 2;
+    resurrectorMeshes[r].position.copy(tempSpawnPos);
+    resurrectorGroup.add(resurrectorMeshes[r]);
+    resurrectorAlive[r] = true;
+    resurrectorHealth[r] = MAX_RESURRECTOR_HEALTH;
+    lastResurrectorResurrectTime[r] = -999;
   }
 
   enemies.instanceMatrix.needsUpdate = true;
@@ -1237,6 +1323,10 @@ function updateFireballs(dt: number): void {
           if (!casterAlive[c]) continue;
           if (fb.mesh.position.distanceTo(casterMeshes[c].position) <= r) damageCaster(c, getMagicDamage());
         }
+        for (let r = 0; r < RESURRECTOR_COUNT; r++) {
+          if (!resurrectorAlive[r]) continue;
+          if (fb.mesh.position.distanceTo(resurrectorMeshes[r].position) <= r) damageResurrector(r, getMagicDamage());
+        }
       } else {
         scene.remove(fb.mesh);
         (fb.mesh.geometry as THREE.BufferGeometry).dispose();
@@ -1302,8 +1392,45 @@ function updateFireballs(dt: number): void {
             if (!casterAlive[c2]) continue;
             if (fb.mesh.position.distanceTo(casterMeshes[c2].position) <= r) damageCaster(c2, getMagicDamage());
           }
+          for (let r2 = 0; r2 < RESURRECTOR_COUNT; r2++) {
+            if (!resurrectorAlive[r2]) continue;
+            if (fb.mesh.position.distanceTo(resurrectorMeshes[r2].position) <= r) damageResurrector(r2, getMagicDamage());
+          }
         } else {
           damageCaster(c, getMagicDamage());
+          scene.remove(fb.mesh);
+          (fb.mesh.geometry as THREE.BufferGeometry).dispose();
+          (fb.mesh.material as THREE.Material).dispose();
+          fireballs.splice(i, 1);
+        }
+        break;
+      }
+    }
+    for (let r = 0; r < RESURRECTOR_COUNT; r++) {
+      if (!resurrectorAlive[r]) continue;
+      if (fb.mesh.position.distanceTo(resurrectorMeshes[r].position) < RESURRECTOR_SIZE / 2 + FIREBALL_RADIUS) {
+        if (isAugmentUnlocked('fireball_explosion')) {
+          fb.state = 'exploding';
+          fb.velocity.set(0, 0, 0);
+          fb.explosionElapsed = 0;
+          fb.mesh.position.copy(resurrectorMeshes[r].position);
+          const rHit = getExplosionHitRadius();
+          for (let k = 0; k < ENEMY_COUNT; k++) {
+            if (!enemyAlive[k]) continue;
+            enemies.getMatrixAt(k, enemyMatrix);
+            enemyPosition.setFromMatrixPosition(enemyMatrix);
+            if (fb.mesh.position.distanceTo(enemyPosition) <= rHit) damageRedCube(k, getMagicDamage());
+          }
+          for (let c2 = 0; c2 < CASTER_COUNT; c2++) {
+            if (!casterAlive[c2]) continue;
+            if (fb.mesh.position.distanceTo(casterMeshes[c2].position) <= rHit) damageCaster(c2, getMagicDamage());
+          }
+          for (let r2 = 0; r2 < RESURRECTOR_COUNT; r2++) {
+            if (!resurrectorAlive[r2]) continue;
+            if (fb.mesh.position.distanceTo(resurrectorMeshes[r2].position) <= rHit) damageResurrector(r2, getMagicDamage());
+          }
+        } else {
+          damageResurrector(r, getMagicDamage());
           scene.remove(fb.mesh);
           (fb.mesh.geometry as THREE.BufferGeometry).dispose();
           (fb.mesh.material as THREE.Material).dispose();
@@ -1388,7 +1515,11 @@ document.addEventListener('keydown', (e) => {
   }
   if (e.key === 'k' || e.key === 'K') {
     e.preventDefault();
-    if (!isDead && !isPaused) setSkillTreeOpen(!skillTreeOpen);
+    if (skillTreeOpen) {
+      setSkillTreeOpen(false);
+    } else if (!isDead && !isPaused) {
+      setSkillTreeOpen(true);
+    }
     return;
   }
   if (e.key === 'q' || e.key === 'Q') {
@@ -1436,10 +1567,22 @@ function updateRocks(dt: number): void {
       }
     }
     const rockCasterRadius = CASTER_SIZE / 2 + ROCK_RADIUS;
+    const rockResurrectorRadius = RESURRECTOR_SIZE / 2 + ROCK_RADIUS;
     for (let c = 0; c < CASTER_COUNT; c++) {
       if (!casterAlive[c]) continue;
       if (rock.mesh.position.distanceTo(casterMeshes[c].position) < rockCasterRadius) {
         damageCaster(c, getRangedDamage());
+        scene.remove(rock.mesh);
+        (rock.mesh.geometry as THREE.BufferGeometry).dispose();
+        (rock.mesh.material as THREE.Material).dispose();
+        rocks.splice(i, 1);
+        break;
+      }
+    }
+    for (let r = 0; r < RESURRECTOR_COUNT; r++) {
+      if (!resurrectorAlive[r]) continue;
+      if (rock.mesh.position.distanceTo(resurrectorMeshes[r].position) < rockResurrectorRadius) {
+        damageResurrector(r, getRangedDamage());
         scene.remove(rock.mesh);
         (rock.mesh.geometry as THREE.BufferGeometry).dispose();
         (rock.mesh.material as THREE.Material).dispose();
@@ -1485,6 +1628,12 @@ function updateSword(dt: number, gameTime: number): void {
       if (!casterAlive[c]) continue;
       if (worldPos.distanceTo(casterMeshes[c].position) < CASTER_SIZE / 2 + hitR) {
         damageCaster(c, getMeleeDamage());
+      }
+    }
+    for (let r = 0; r < RESURRECTOR_COUNT; r++) {
+      if (!resurrectorAlive[r]) continue;
+      if (worldPos.distanceTo(resurrectorMeshes[r].position) < RESURRECTOR_SIZE / 2 + hitR) {
+        damageResurrector(r, getMeleeDamage());
       }
     }
   };
@@ -1556,6 +1705,60 @@ function updateCasters(dt: number, gameTime: number): void {
         velocity: dir.multiplyScalar(ENEMY_FIREBALL_SPEED),
         ttl: ENEMY_FIREBALL_TTL,
       });
+    }
+  }
+}
+
+function updateResurrectors(dt: number, gameTime: number): void {
+  const charPos = character.position;
+  for (let r = 0; r < RESURRECTOR_COUNT; r++) {
+    if (!resurrectorAlive[r]) continue;
+    const pos = resurrectorMeshes[r].position;
+    const dx = charPos.x - pos.x;
+    const dz = charPos.z - pos.z;
+    const dist = Math.sqrt(dx * dx + dz * dz);
+    if (dist > 0.02) {
+      const targetDist = RESURRECTOR_PREFERRED_RANGE;
+      const moveAmount = RESURRECTOR_SPEED * dt;
+      if (dist > targetDist) {
+        const move = Math.min(moveAmount, dist - targetDist);
+        pos.x += (dx / dist) * move;
+        pos.z += (dz / dist) * move;
+      } else if (dist < targetDist) {
+        const move = Math.min(moveAmount, targetDist - dist);
+        pos.x -= (dx / dist) * move;
+        pos.z -= (dz / dist) * move;
+      }
+    }
+    pos.y = RESURRECTOR_SIZE / 2;
+
+    if (gameTime - lastResurrectorResurrectTime[r] >= RESURRECT_COOLDOWN && bodies.length > 0) {
+      let nearestIdx = -1;
+      let nearestDist = RESURRECT_RANGE;
+      for (let b = 0; b < bodies.length; b++) {
+        const body = bodies[b];
+        if (body.enemyIndex >= levelGruntsCount) continue;
+        const d = pos.distanceTo(body.position);
+        if (d < nearestDist) {
+          nearestDist = d;
+          nearestIdx = b;
+        }
+      }
+      if (nearestIdx >= 0) {
+        const body = bodies[nearestIdx];
+        resurrectEnemyInstance(enemies, body.enemyIndex, body.position);
+        enemyPositions[body.enemyIndex].copy(body.position);
+        enemyHealth[body.enemyIndex] = MAX_ENEMY_HEALTH;
+        enemyAlive[body.enemyIndex] = true;
+        enemyExplosionState[body.enemyIndex] = 'moving';
+        enemyExplosionChargeStart[body.enemyIndex] = -999;
+        enemyExplosionLastTime[body.enemyIndex] = -999;
+        bodiesGroup.remove(body.mesh);
+        (body.mesh.geometry as THREE.BufferGeometry).dispose();
+        (body.mesh.material as THREE.Material).dispose();
+        bodies.splice(nearestIdx, 1);
+        lastResurrectorResurrectTime[r] = gameTime;
+      }
     }
   }
 }
@@ -1690,6 +1893,7 @@ const gameLoop = new GameLoop(
     updateEnemies(dt, gameTime);
     updateEnemyAttackHitEffects(gameTime);
     updateCasters(dt, gameTime);
+    updateResurrectors(dt, gameTime);
     updateSword(dt, gameTime);
     updateFireballs(dt);
     updateRocks(dt);
@@ -1746,6 +1950,22 @@ const gameLoop = new GameLoop(
       bar.wrap.style.top = `${py - ENEMY_HEALTH_BAR_HEIGHT - 4}px`;
       bar.wrap.style.visibility = 'visible';
       bar.fill.style.width = `${(casterHealth[c] / MAX_CASTER_HEALTH) * 100}%`;
+    }
+    for (let r = 0; r < RESURRECTOR_COUNT; r++) {
+      const bar = resurrectorHealthBarEls[r];
+      if (!resurrectorAlive[r]) {
+        bar.wrap.style.visibility = 'hidden';
+        continue;
+      }
+      const pos = resurrectorMeshes[r].position;
+      healthBarProjectionVec.set(pos.x, pos.y + HEALTH_BAR_Y_OFFSET, pos.z);
+      healthBarProjectionVec.project(camera);
+      const px = (healthBarProjectionVec.x * 0.5 + 0.5) * cw;
+      const py = (1 - (healthBarProjectionVec.y * 0.5 + 0.5)) * ch;
+      bar.wrap.style.left = `${px - ENEMY_HEALTH_BAR_WIDTH / 2}px`;
+      bar.wrap.style.top = `${py - ENEMY_HEALTH_BAR_HEIGHT - 4}px`;
+      bar.wrap.style.visibility = 'visible';
+      bar.fill.style.width = `${(resurrectorHealth[r] / MAX_RESURRECTOR_HEALTH) * 100}%`;
     }
     renderer.render(scene, isoCamera.three);
   }

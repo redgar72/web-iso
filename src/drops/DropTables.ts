@@ -4,7 +4,7 @@
 
 export type DropType = 'health' | 'mana' | null;
 
-export type MonsterType = 'redCube' | 'caster';
+export type MonsterType = 'redCube' | 'caster' | 'resurrector';
 
 interface DropEntry {
   chance: number;
@@ -21,6 +21,11 @@ const DROP_TABLES: Record<MonsterType, DropEntry[]> = {
   caster: [
     { chance: 0.40, drop: null },
     { chance: 0.25, drop: 'health' },
+    { chance: 0.35, drop: 'mana' },
+  ],
+  resurrector: [
+    { chance: 0.35, drop: null },
+    { chance: 0.30, drop: 'health' },
     { chance: 0.35, drop: 'mana' },
   ],
 };
