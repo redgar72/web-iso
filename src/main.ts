@@ -618,9 +618,102 @@ for (let j = 0; j < ENEMY_COUNT; j++) {
 }
 container.appendChild(enemyHealthBarsContainer);
 
+// Floating combat hit markers
+const hitMarkersContainer = document.createElement('div');
+hitMarkersContainer.style.cssText = 'position:absolute;inset:0;z-index:5;pointer-events:none;';
+container.appendChild(hitMarkersContainer);
+
+interface HitMarker {
+  element: HTMLDivElement;
+  worldPosition: THREE.Vector3;
+  spawnTime: number; // actual time in seconds
+  amount: number;
+  offsetY: number; // Current vertical offset for floating animation
+}
+
+const hitMarkers: HitMarker[] = [];
+const HIT_MARKER_DURATION = 1.0; // seconds
+const HIT_MARKER_FLOAT_DISTANCE = 1.5; // world units
+const HIT_MARKER_Y_OFFSET = 1.5; // base offset above entity
+const hitMarkerProjectionVec = new THREE.Vector3();
+
+function createHitMarker(position: THREE.Vector3, amount: number): void {
+  const element = document.createElement('div');
+  element.textContent = Math.round(amount).toString();
+  element.style.cssText = `
+    position: absolute;
+    font: bold 20px/1 sans-serif;
+    color: #ff4444;
+    text-shadow: 0 0 8px rgba(255, 68, 68, 0.8), 0 2px 4px rgba(0, 0, 0, 0.8);
+    white-space: nowrap;
+    pointer-events: none;
+    transform: translate(-50%, -50%);
+    will-change: transform, opacity;
+  `;
+  hitMarkersContainer.appendChild(element);
+
+  hitMarkers.push({
+    element,
+    worldPosition: position.clone(),
+    spawnTime: performance.now() / 1000, // Use actual time for smooth animation
+    amount,
+    offsetY: 0,
+  });
+}
+
+function updateHitMarkers(currentTime: number, camera: THREE.Camera, cw: number, ch: number): void {
+  for (let i = hitMarkers.length - 1; i >= 0; i--) {
+    const marker = hitMarkers[i];
+    const age = currentTime - marker.spawnTime;
+    
+    if (age >= HIT_MARKER_DURATION) {
+      // Remove expired marker
+      hitMarkersContainer.removeChild(marker.element);
+      hitMarkers.splice(i, 1);
+      continue;
+    }
+
+    // Update floating animation
+    const progress = age / HIT_MARKER_DURATION;
+    marker.offsetY = HIT_MARKER_FLOAT_DISTANCE * progress;
+    
+    // Fade out
+    const opacity = 1.0 - progress;
+    marker.element.style.opacity = opacity.toString();
+
+    // Project 3D position to screen space
+    hitMarkerProjectionVec.set(
+      marker.worldPosition.x,
+      marker.worldPosition.y + HIT_MARKER_Y_OFFSET + marker.offsetY,
+      marker.worldPosition.z
+    );
+    hitMarkerProjectionVec.project(camera);
+    
+    const px = (hitMarkerProjectionVec.x * 0.5 + 0.5) * cw;
+    const py = (1 - (hitMarkerProjectionVec.y * 0.5 + 0.5)) * ch;
+    
+    // Only show if in front of camera
+    if (hitMarkerProjectionVec.z < 1) {
+      marker.element.style.left = `${px}px`;
+      marker.element.style.top = `${py}px`;
+      marker.element.style.visibility = 'visible';
+    } else {
+      marker.element.style.visibility = 'hidden';
+    }
+  }
+}
+
 function setHealth(value: number): void {
   const max = getMaxHealth();
+  const oldHealth = health;
   health = Math.max(0, Math.min(max, value));
+  
+  // Show hit marker if player took damage
+  if (health < oldHealth && oldHealth > 0) {
+    const damage = oldHealth - health;
+    createHitMarker(character.position, damage);
+  }
+  
   healthFill.style.width = `${(health / max) * 100}%`;
   healthBarWrap.title = `${health} / ${max}`;
   if (health <= 0) showGameOver();
@@ -845,6 +938,7 @@ const lastCasterResurrectTime: number[] = Array(CASTER_COUNT).fill(-999);
 
 /** Returns true if the caster died. Does not dispose mesh so casters can be reused for next level. */
 function damageCaster(c: number, amount: number): boolean {
+  createHitMarker(casterMeshes[c].position, amount);
   casterHealth[c] = Math.max(0, casterHealth[c] - amount);
   if (casterHealth[c] <= 0) {
     addXp(XP_CASTER);
@@ -893,6 +987,7 @@ const resurrectorHealth = Array(RESURRECTOR_COUNT).fill(MAX_RESURRECTOR_HEALTH);
 
 /** Returns true if the resurrector died. */
 function damageResurrector(r: number, amount: number): boolean {
+  createHitMarker(resurrectorMeshes[r].position, amount);
   resurrectorHealth[r] = Math.max(0, resurrectorHealth[r] - amount);
   if (resurrectorHealth[r] <= 0) {
     addXp(XP_RESURRECTOR);
@@ -986,6 +1081,7 @@ enemyHealthBarsContainer.appendChild(bossHealthBarEl.wrap);
 
 /** Returns true if the boss died. */
 function damageBoss(amount: number): boolean {
+  createHitMarker(BOSS_POSITION, amount);
   bossHealth = Math.max(0, bossHealth - amount);
   if (bossHealth <= 0) {
     addXp(200); // Boss gives lots of XP
@@ -1577,6 +1673,7 @@ function getRockCooldown(): number {
 
 /** Returns true if the enemy died. */
 function damageRedCube(j: number, amount: number): boolean {
+  createHitMarker(enemyPositions[j], amount);
   enemyHealth[j] = Math.max(0, enemyHealth[j] - amount);
   if (enemyHealth[j] <= 0) {
     addXp(XP_RED_CUBE);
@@ -2421,6 +2518,18 @@ function updateCasters(dt: number, gameTime: number): void {
       }
     }
     
+    // Collision with boss
+    if (bossAlive) {
+      const toBoss = new THREE.Vector3().subVectors(pos, BOSS_POSITION);
+      const dist = toBoss.length();
+      const minDist = CASTER_COLLISION_RADIUS + BOSS_HITBOX_RADIUS;
+      if (dist < minDist && dist > 0.001) {
+        const overlap = minDist - dist;
+        toBoss.normalize();
+        collisionPushVec.addScaledVector(toBoss, overlap * COLLISION_PUSH_STRENGTH);
+      }
+    }
+    
     // Apply collision push
     if (collisionPushVec.lengthSq() > 0.0001) {
       pos.addScaledVector(collisionPushVec, dt);
@@ -2857,6 +2966,18 @@ function updateEnemies(dt: number, gameTime: number): void {
       }
     }
     
+    // Collision with boss
+    if (bossAlive) {
+      const toBoss = new THREE.Vector3().subVectors(pos, BOSS_POSITION);
+      const dist = toBoss.length();
+      const minDist = ENEMY_COLLISION_RADIUS + BOSS_HITBOX_RADIUS;
+      if (dist < minDist && dist > 0.001) {
+        const overlap = minDist - dist;
+        toBoss.normalize();
+        separationVec.addScaledVector(toBoss, overlap * COLLISION_PUSH_STRENGTH);
+      }
+    }
+    
     enemyPositions[j].addScaledVector(separationVec, dt);
     enemyPositions[j].y = ENEMY_SIZE / 2;
   }
@@ -3042,6 +3163,8 @@ const gameLoop = new GameLoop(
       bossHealthBarEl.wrap.style.visibility = 'visible';
       bossHealthBarEl.fill.style.width = `${(bossHealth / MAX_BOSS_HEALTH) * 100}%`;
     }
+    // Update floating hit markers
+    updateHitMarkers(now / 1000, camera, cw, ch);
     renderer.render(scene, isoCamera.three);
   }
 );
