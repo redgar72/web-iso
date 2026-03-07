@@ -59,7 +59,7 @@ export const AUGMENT_TREE: AugmentDef[] = [
 ];
 
 /** Unlocked base skill IDs. */
-const unlockedSkills = new Set<SkillId>(['sword']);
+const unlockedSkills = new Set<SkillId>();
 
 /** Unlocked augment IDs. */
 const unlockedAugments = new Set<AugmentId>();

@@ -3,55 +3,57 @@ import * as THREE from 'three';
 export const ENEMY_SIZE = 0.8;
 export const ENEMY_COUNT = 24;
 
-/**
- * Spawns a bunch of enemies as red cubes, scattered on the terrain.
- */
-export function createEnemies(): THREE.InstancedMesh {
-  const geometry = new THREE.BoxGeometry(ENEMY_SIZE, ENEMY_SIZE, ENEMY_SIZE);
-  const material = new THREE.MeshStandardMaterial({
-    color: 0xc03030,
-    roughness: 0.6,
-    metalness: 0.15,
-  });
-  const mesh = new THREE.InstancedMesh(geometry, material, ENEMY_COUNT);
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
-  // InstancedMesh only uses the base geometry's bounds (around origin) for culling, so instances
-  // at the portal or below the world can be culled. Disable so all instances are always drawn.
-  mesh.frustumCulled = false;
+// Hide by moving below the world
+const HIDDEN_Y = -1000;
 
-  const matrix = new THREE.Matrix4();
-  const position = new THREE.Vector3();
+/**
+ * Creates enemy sprites using the grunt sprite texture.
+ * Similar to how casters are rendered.
+ */
+export function createEnemies(): THREE.Group {
+  const group = new THREE.Group();
+  
+  // Load grunt sprite texture
+  const textureLoader = new THREE.TextureLoader();
+  const gruntSpriteTexture = textureLoader.load('/sprites/grunt.png');
+  gruntSpriteTexture.colorSpace = THREE.SRGBColorSpace;
+  
+  // Create sprite for each enemy
   for (let i = 0; i < ENEMY_COUNT; i++) {
-    position.set(
+    const spriteMaterial = new THREE.SpriteMaterial({ 
+      map: gruntSpriteTexture,
+      transparent: true,
+      alphaTest: 0.01,
+      depthWrite: false
+    });
+    const sprite = new THREE.Sprite(spriteMaterial);
+    sprite.position.set(
       2 + Math.random() * 20,
       ENEMY_SIZE / 2,
       2 + Math.random() * 20
     );
-    matrix.setPosition(position);
-    mesh.setMatrixAt(i, matrix);
+    // Scale sprite - sprites scale in world units, make it visible
+    // Using a larger scale since sprites are 2D and need to be prominent
+    sprite.scale.set(ENEMY_SIZE * 3, ENEMY_SIZE * 3, 1);
+    group.add(sprite);
   }
-  mesh.instanceMatrix.needsUpdate = true;
-  return mesh;
+  
+  return group;
 }
 
-const _tempMatrix = new THREE.Matrix4();
-
-// Hide by moving below the world (keep scale 1). Zero-scale can leave instances invisible on some GPUs.
-const HIDDEN_Y = -1000;
-
 /** Hides an enemy instance (e.g. when killed by a fireball). */
-export function killEnemyInstance(mesh: THREE.InstancedMesh, index: number): void {
-  _tempMatrix.identity();
-  _tempMatrix.setPosition(0, HIDDEN_Y, 0);
-  mesh.setMatrixAt(index, _tempMatrix);
-  mesh.instanceMatrix.needsUpdate = true;
+export function killEnemyInstance(group: THREE.Group, index: number): void {
+  const enemy = group.children[index] as THREE.Object3D;
+  if (enemy) {
+    enemy.position.y = HIDDEN_Y;
+  }
 }
 
 /** Restores an enemy instance at the given position (e.g. when resurrected from a body). */
-export function resurrectEnemyInstance(mesh: THREE.InstancedMesh, index: number, position: THREE.Vector3): void {
-  _tempMatrix.identity();
-  _tempMatrix.setPosition(position.x, position.y, position.z);
-  mesh.setMatrixAt(index, _tempMatrix);
-  mesh.instanceMatrix.needsUpdate = true;
+export function resurrectEnemyInstance(group: THREE.Group, index: number, position: THREE.Vector3): void {
+  const enemy = group.children[index] as THREE.Object3D;
+  if (enemy) {
+    // Position sprite at ground level (y = ENEMY_SIZE / 2 for sprites)
+    enemy.position.set(position.x, ENEMY_SIZE / 2, position.z);
+  }
 }
