@@ -2656,6 +2656,18 @@ function updateResurrectors(dt: number, gameTime: number): void {
       }
     }
     
+    // Collision with boss
+    if (bossAlive) {
+      const toBoss = new THREE.Vector3().subVectors(pos, BOSS_POSITION);
+      const dist = toBoss.length();
+      const minDist = RESURRECTOR_COLLISION_RADIUS + BOSS_HITBOX_RADIUS;
+      if (dist < minDist && dist > 0.001) {
+        const overlap = minDist - dist;
+        toBoss.normalize();
+        collisionPushVec.addScaledVector(toBoss, overlap * COLLISION_PUSH_STRENGTH);
+      }
+    }
+    
     // Apply collision push
     if (collisionPushVec.lengthSq() > 0.0001) {
       pos.addScaledVector(collisionPushVec, dt);
