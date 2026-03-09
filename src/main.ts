@@ -2455,15 +2455,13 @@ function updateCasters(dt: number, gameTime: number): void {
     if (dist > 0.02) {
       const targetDist = CASTER_PREFERRED_RANGE;
       const moveAmount = CASTER_SPEED * dt;
+      // Only move toward player when beyond preferred range; stand still when within range
       if (dist > targetDist) {
         const move = Math.min(moveAmount, dist - targetDist);
         pos.x += (dx / dist) * move;
         pos.z += (dz / dist) * move;
-      } else if (dist < targetDist) {
-        const move = Math.min(moveAmount, targetDist - dist);
-        pos.x -= (dx / dist) * move;
-        pos.z -= (dz / dist) * move;
       }
+      // When within range: do not back away
     }
     
     // Collision with player
