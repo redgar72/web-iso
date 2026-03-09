@@ -15,6 +15,9 @@
 - **Player state** → `src/state/PlayerState.ts`  
   - `createPlayerState(config?)` returns getters/setters, `addXp`, `allocateStat`, damage helpers, and `setOnDeath` / `setOnLevelUp`. Main wires callbacks after creation and syncs bar DOM via `updateHealthBar`, `updateManaBar`, `updateStatsDisplay`, `updateXpDisplay`.
 
+- **Wave system** → `src/game/Waves.ts`  
+  - `createWaves(callbacks)` returns `getCurrentWave`, `getWaveComposition`, `getWaveSpawnPosition`, `getLevelGruntsCount` / `getLevelCastersCount` / `getLevelResurrectorsCount`, `startWave(wave)`, and `isWaveComplete(checkAlive)`. Main implements `onStartWave(wave, composition, getSpawnPosition)` to clear and spawn enemies; wave rules and spawn positions live in Waves.
+
 ## Recommended next steps
 
 ### 1. ~~Player state module~~ (done) (`src/state/PlayerState.ts` or `src/game/PlayerState.ts`)
@@ -36,7 +39,7 @@
 - **Fireballs / rocks:** Same idea: `src/combat/Fireballs.ts` and `src/combat/Rocks.ts` (or one `Projectiles.ts`) that own meshes, velocity, and collision; they call a provided `onHit(entityType, index, position)` (and optionally `applyBurn`).
 - **Benefit:** main.ts becomes “wire combat to damage/effects” instead of “implement all combat”.
 
-### 4. Wave system
+### 4. ~~Wave system~~ (done)
 - **Move:** `currentWave`, `levelGruntsCount`, `levelCastersCount`, `levelResurrectorsCount`, `getWaveComposition`, `isAnyEnemyAlive`, `startWave`, and the “clear bodies + effects + spawn” logic into e.g. `src/game/Waves.ts`.
 - **Expose:** `startWave(waveNumber)` and `isWaveComplete()` (or `isAnyEnemyAlive()`). Wave module calls into enemy manager (or main) to spawn/kill/clear.
 - **Benefit:** Wave rules and composition live in one place; main just checks “wave complete?” and calls `startWave(next)`.
@@ -57,8 +60,9 @@
 2. **Player state** – Done.  
 3. **Floating damage** – Done.  
 4. **Burn visuals** – Small, self-contained.  
-5. **Waves** – Then **enemy manager** (or per-type modules), so wave logic talks to one place.  
-6. **Combat (sword, fireballs, rocks)** – After enemies are behind an API.  
-7. **HUD** – Can be done anytime; mostly DOM and projection.
+5. **Waves** – Done.  
+6. **Enemy manager** (or per-type modules) – So wave logic talks to one place.  
+7. **Combat (sword, fireballs, rocks)** – After enemies are behind an API.  
+8. **HUD** – Can be done anytime; mostly DOM and projection.
 
 Avoid doing “everything in one PR”. One or two modules per change keeps reviews and rollbacks manageable.

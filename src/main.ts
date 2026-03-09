@@ -20,6 +20,7 @@ import {
   type SkillId,
   type AugmentId,
 } from './skills/SkillTree';
+import { createWaves } from './game/Waves';
 
 const container = document.getElementById('app')!;
 let width = container.clientWidth;
@@ -365,7 +366,7 @@ function respawn(): void {
   playerBurning = false; // Clear burning on respawn
   activePrayer = null; // Clear prayer on respawn
   updatePrayerButtons();
-  startWave(1);
+  waves.startWave(1);
 }
 
 respawnBtn.addEventListener('click', respawn);
@@ -958,27 +959,33 @@ for (let c = 0; c < CASTER_COUNT; c++) {
 }
 scene.add(casterGroup);
 
-// Resurrector enemies: dark teal capsules that resurrect fallen grunts (spawn from wave 5, after double casters)
+// Resurrector enemies: resurrect fallen grunts (spawn from wave 5, after double casters)
 const RESURRECTOR_COUNT = 3;
 const RESURRECTOR_SPEED = 1.8;
 const RESURRECTOR_SIZE = 0.55;
 const RESURRECTOR_PREFERRED_RANGE = 8;
 
 const resurrectorGroup = new THREE.Group();
-const resurrectorMeshes: THREE.Mesh[] = [];
+const resurrectorMeshes: THREE.Object3D[] = [];
 const resurrectorAlive: boolean[] = [];
 const lastResurrectorResurrectTime: number[] = [];
 
+const resurrectorTextureLoader = new THREE.TextureLoader();
+const resurrectorSpriteTexture = resurrectorTextureLoader.load('/sprites/resurrector.png');
+resurrectorSpriteTexture.colorSpace = THREE.SRGBColorSpace;
+
 for (let i = 0; i < RESURRECTOR_COUNT; i++) {
-  const mesh = new THREE.Mesh(
-    new THREE.ConeGeometry(RESURRECTOR_SIZE * 0.55, RESURRECTOR_SIZE * 1.2, 6),
-    new THREE.MeshStandardMaterial({ color: 0x2d5a4a, roughness: 0.7, metalness: 0.05, emissive: 0x0a2018 })
-  );
-  mesh.position.set(8 + Math.random() * 16, RESURRECTOR_SIZE / 2, 8 + Math.random() * 16);
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
-  resurrectorGroup.add(mesh);
-  resurrectorMeshes.push(mesh);
+  const spriteMaterial = new THREE.SpriteMaterial({
+    map: resurrectorSpriteTexture,
+    transparent: true,
+    alphaTest: 0.01,
+    depthWrite: false
+  });
+  const sprite = new THREE.Sprite(spriteMaterial);
+  sprite.position.set(8 + Math.random() * 16, RESURRECTOR_SIZE / 2, 8 + Math.random() * 16);
+  sprite.scale.set(RESURRECTOR_SIZE * 3, RESURRECTOR_SIZE * 3, 1);
+  resurrectorGroup.add(sprite);
+  resurrectorMeshes.push(sprite);
   resurrectorAlive.push(false);
   lastResurrectorResurrectTime.push(-999);
 }
@@ -1593,12 +1600,12 @@ function performMeleeAttack(gameTime: number, targetDirection?: THREE.Vector3): 
   // Start sword swing animation
   swordSwingStartTime = gameTime;
   
-  // Check enemies - only hit those in front
+  // Check enemies - only hit those in front (range = enemy radius + melee)
   for (let j = 0; j < ENEMY_COUNT; j++) {
     if (!enemyAlive[j]) continue;
     const toEnemy = new THREE.Vector3().subVectors(enemyPositions[j], charPos);
     const dist = toEnemy.length();
-    if (dist <= MELEE_RANGE && dist > 0.01) {
+    if (dist <= ENEMY_COLLISION_RADIUS + MELEE_RANGE && dist > 0.01) {
       toEnemy.normalize();
       const dot = attackDir.dot(toEnemy);
       const angle = Math.acos(Math.max(-1, Math.min(1, dot)));
@@ -1608,12 +1615,12 @@ function performMeleeAttack(gameTime: number, targetDirection?: THREE.Vector3): 
     }
   }
   
-  // Check casters - only hit those in front
+  // Check casters - only hit those in front (range = caster radius + melee)
   for (let c = 0; c < CASTER_COUNT; c++) {
     if (!casterAlive[c]) continue;
     const toCaster = new THREE.Vector3().subVectors(casterMeshes[c].position, charPos);
     const dist = toCaster.length();
-    if (dist <= MELEE_RANGE && dist > 0.01) {
+    if (dist <= CASTER_COLLISION_RADIUS + MELEE_RANGE && dist > 0.01) {
       toCaster.normalize();
       const dot = attackDir.dot(toCaster);
       const angle = Math.acos(Math.max(-1, Math.min(1, dot)));
@@ -1623,12 +1630,12 @@ function performMeleeAttack(gameTime: number, targetDirection?: THREE.Vector3): 
     }
   }
   
-  // Check resurrectors - only hit those in front
+  // Check resurrectors - only hit those in front (range = resurrector radius + melee)
   for (let r = 0; r < RESURRECTOR_COUNT; r++) {
     if (!resurrectorAlive[r]) continue;
     const toResurrector = new THREE.Vector3().subVectors(resurrectorMeshes[r].position, charPos);
     const dist = toResurrector.length();
-    if (dist <= MELEE_RANGE && dist > 0.01) {
+    if (dist <= RESURRECTOR_COLLISION_RADIUS + MELEE_RANGE && dist > 0.01) {
       toResurrector.normalize();
       const dot = attackDir.dot(toResurrector);
       const angle = Math.acos(Math.max(-1, Math.min(1, dot)));
@@ -1807,139 +1814,95 @@ const enemyPositions = Array.from({ length: ENEMY_COUNT }, () => new THREE.Vecto
 const separationVec = new THREE.Vector3();
 const collisionPushVec = new THREE.Vector3();
 
-// Wave structure (Inferno-style): fixed waves, spawn randomly in battlespace, consistent seed
-const WAVE_SEED = 12345;
-const BATTLE_MIN = 6;
-const BATTLE_MAX = 42;
-
-function seededRandom(seed: number): () => number {
-  let s = seed | 0;
-  return () => {
-    s = (s + 0x6d2b79f5) | 0;
-    let t = Math.imul(s ^ (s >>> 15), 1 | s);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-function getWaveSpawnPosition(wave: number, index: number, out: THREE.Vector3): void {
-  const rng = seededRandom(WAVE_SEED + wave * 1000 + index);
-  out.x = BATTLE_MIN + rng() * (BATTLE_MAX - BATTLE_MIN);
-  out.z = BATTLE_MIN + rng() * (BATTLE_MAX - BATTLE_MIN);
-  out.y = 0;
-}
-
-/** Wave 1: 1 cube. Wave 2: 2 cubes. Wave 3: 1 caster. Wave 4: 2 casters. Wave 5+: grunts + 2 casters + resurrector(s) so resurrector has bodies to raise. */
-function getWaveComposition(wave: number): { grunts: number; casters: number; resurrectors: number } {
-  if (wave >= 5) {
-    const resurrectorCount = Math.min(1 + Math.floor((wave - 5) / 2), RESURRECTOR_COUNT);
-    const grunts = Math.min(1 + (wave - 5), 4); // 1 grunt wave 5, 2 wave 6, etc., cap 4
-    return { grunts, casters: 2, resurrectors: resurrectorCount };
-  }
-  if (wave === 1) return { grunts: 1, casters: 0, resurrectors: 0 };
-  if (wave === 2) return { grunts: 2, casters: 0, resurrectors: 0 };
-  if (wave === 3) return { grunts: 0, casters: 1, resurrectors: 0 };
-  return { grunts: 0, casters: 2, resurrectors: 0 }; // wave 4
-}
-
-let currentWave = 1;
-/** Grunt slots in play this wave (indices 0..levelGruntsCount-1). */
-let levelGruntsCount = 1;
-/** Caster slots in play this wave (indices 0..levelCastersCount-1). */
-let levelCastersCount = 0;
-/** Resurrector slots in play this wave (indices 0..levelResurrectorsCount-1). */
-let levelResurrectorsCount = 0;
+// Wave system: composition and spawn positions in Waves.ts; clear/spawn via callback
 const tempSpawnPos = new THREE.Vector3();
+const waveSpawnOut = { x: 0, y: 0, z: 0 };
+
+const waves = createWaves({
+  onStartWave(wave, composition, getSpawnPosition) {
+    const { grunts, casters, resurrectors } = composition;
+    attackTarget = null;
+    moveTarget = null;
+
+    for (let j = 0; j < ENEMY_COUNT; j++) killEnemyInstance(enemies, j);
+    for (let c = 0; c < CASTER_COUNT; c++) {
+      casterGroup.remove(casterMeshes[c]);
+      casterAlive[c] = false;
+    }
+    for (let r = 0; r < RESURRECTOR_COUNT; r++) {
+      resurrectorGroup.remove(resurrectorMeshes[r]);
+      resurrectorAlive[r] = false;
+    }
+
+    if (wave >= 1) {
+      if (bossMesh === null) {
+        bossMesh = createBossMesh();
+      }
+      if (!bossGroup.children.includes(bossMesh)) {
+        bossGroup.add(bossMesh);
+      }
+      if (!bossAlive) {
+        bossAlive = true;
+        bossHealth = MAX_BOSS_HEALTH;
+        lastBossFireballTime = -999;
+        addChatMessage('Boss has appeared!');
+      }
+    }
+
+    for (let j = 0; j < grunts; j++) {
+      getSpawnPosition(j, waveSpawnOut);
+      tempSpawnPos.set(waveSpawnOut.x, ENEMY_SIZE / 2, waveSpawnOut.z);
+      resurrectEnemyInstance(enemies, j, tempSpawnPos);
+      enemyAlive[j] = true;
+      enemyHealth[j] = MAX_ENEMY_HEALTH;
+      enemyPositions[j].copy(tempSpawnPos);
+      lastEnemyDamageTime[j] = -999;
+      lastSwordHitByEnemy[j] = -999;
+      enemyExplosionState[j] = 'moving';
+      enemyExplosionChargeStart[j] = -999;
+      enemyExplosionLastTime[j] = -999;
+    }
+
+    for (let c = 0; c < casters; c++) {
+      getSpawnPosition(100 + c, waveSpawnOut);
+      tempSpawnPos.set(waveSpawnOut.x, CASTER_SIZE / 2, waveSpawnOut.z);
+      casterMeshes[c].position.copy(tempSpawnPos);
+      casterGroup.add(casterMeshes[c]);
+      casterAlive[c] = true;
+      casterHealth[c] = MAX_CASTER_HEALTH;
+      lastCasterThrowTime[c] = -999;
+      lastCasterResurrectTime[c] = -999;
+    }
+
+    for (let r = 0; r < resurrectors; r++) {
+      getSpawnPosition(200 + r, waveSpawnOut);
+      tempSpawnPos.set(waveSpawnOut.x, RESURRECTOR_SIZE / 2, waveSpawnOut.z);
+      resurrectorMeshes[r].position.copy(tempSpawnPos);
+      resurrectorGroup.add(resurrectorMeshes[r]);
+      resurrectorAlive[r] = true;
+      resurrectorHealth[r] = MAX_RESURRECTOR_HEALTH;
+      lastResurrectorResurrectTime[r] = -999;
+    }
+
+    for (let j = 0; j < ENEMY_COUNT; j++) {
+      const enemy = enemies.children[j] as THREE.Object3D;
+      if (enemy) {
+        enemy.position.set(enemyPositions[j].x, ENEMY_SIZE / 2, enemyPositions[j].z);
+      }
+    }
+    waveEl.textContent = String(wave);
+  },
+});
 
 function isAnyEnemyAlive(): boolean {
-  for (let j = 0; j < levelGruntsCount; j++) if (enemyAlive[j]) return true;
-  for (let c = 0; c < levelCastersCount; c++) if (casterAlive[c]) return true;
-  for (let r = 0; r < levelResurrectorsCount; r++) if (resurrectorAlive[r]) return true;
+  const grunts = waves.getLevelGruntsCount();
+  const casters = waves.getLevelCastersCount();
+  const resurrectors = waves.getLevelResurrectorsCount();
+  for (let j = 0; j < grunts; j++) if (enemyAlive[j]) return true;
+  for (let c = 0; c < casters; c++) if (casterAlive[c]) return true;
+  for (let r = 0; r < resurrectors; r++) if (resurrectorAlive[r]) return true;
   if (bossAlive) return true;
   return false;
-}
-
-function startWave(wave: number): void {
-  currentWave = wave;
-  const { grunts, casters, resurrectors } = getWaveComposition(wave);
-  levelGruntsCount = grunts;
-  levelCastersCount = casters;
-  levelResurrectorsCount = resurrectors;
-
-  // Clear attack target when starting new wave
-  attackTarget = null;
-  moveTarget = null;
-
-  for (let j = 0; j < ENEMY_COUNT; j++) killEnemyInstance(enemies, j);
-  for (let c = 0; c < CASTER_COUNT; c++) {
-    casterGroup.remove(casterMeshes[c]);
-    casterAlive[c] = false;
-  }
-  for (let r = 0; r < RESURRECTOR_COUNT; r++) {
-    resurrectorGroup.remove(resurrectorMeshes[r]);
-    resurrectorAlive[r] = false;
-  }
-  
-  // Spawn boss from wave 1 for testing
-  if (wave >= 1) {
-    if (bossMesh === null) {
-      bossMesh = createBossMesh();
-    }
-    if (!bossGroup.children.includes(bossMesh)) {
-      bossGroup.add(bossMesh);
-    }
-    if (!bossAlive) {
-      bossAlive = true;
-      bossHealth = MAX_BOSS_HEALTH;
-      lastBossFireballTime = -999;
-      addChatMessage('Boss has appeared!');
-    }
-  }
-
-  for (let j = 0; j < levelGruntsCount; j++) {
-    getWaveSpawnPosition(wave, j, tempSpawnPos);
-    tempSpawnPos.y = ENEMY_SIZE / 2;
-    resurrectEnemyInstance(enemies, j, tempSpawnPos);
-    enemyAlive[j] = true;
-    enemyHealth[j] = MAX_ENEMY_HEALTH;
-    enemyPositions[j].copy(tempSpawnPos);
-    lastEnemyDamageTime[j] = -999;
-    lastSwordHitByEnemy[j] = -999;
-    enemyExplosionState[j] = 'moving';
-    enemyExplosionChargeStart[j] = -999;
-    enemyExplosionLastTime[j] = -999;
-  }
-
-  for (let c = 0; c < levelCastersCount; c++) {
-    getWaveSpawnPosition(wave, 100 + c, tempSpawnPos);
-    tempSpawnPos.y = CASTER_SIZE / 2;
-    casterMeshes[c].position.copy(tempSpawnPos);
-    casterGroup.add(casterMeshes[c]);
-    casterAlive[c] = true;
-    casterHealth[c] = MAX_CASTER_HEALTH;
-    lastCasterThrowTime[c] = -999;
-    lastCasterResurrectTime[c] = -999;
-  }
-
-  for (let r = 0; r < levelResurrectorsCount; r++) {
-    getWaveSpawnPosition(wave, 200 + r, tempSpawnPos);
-    tempSpawnPos.y = RESURRECTOR_SIZE / 2;
-    resurrectorMeshes[r].position.copy(tempSpawnPos);
-    resurrectorGroup.add(resurrectorMeshes[r]);
-    resurrectorAlive[r] = true;
-    resurrectorHealth[r] = MAX_RESURRECTOR_HEALTH;
-    lastResurrectorResurrectTime[r] = -999;
-  }
-
-  // Update enemy positions from enemyPositions
-  for (let j = 0; j < ENEMY_COUNT; j++) {
-    const enemy = enemies.children[j] as THREE.Object3D;
-    if (enemy) {
-      // Position sprite at ENEMY_SIZE/2 (sprites are positioned at their center)
-      enemy.position.set(enemyPositions[j].x, ENEMY_SIZE / 2, enemyPositions[j].z);
-    }
-  }
-  waveEl.textContent = String(currentWave);
 }
 
 // Bodies: when red cubes die they leave a corpse that casters can resurrect
@@ -2540,7 +2503,7 @@ function updateCasters(dt: number, gameTime: number): void {
       let nearestDist = RESURRECT_RANGE;
       for (let b = 0; b < bodies.length; b++) {
         const body = bodies[b];
-        if (body.enemyIndex >= levelGruntsCount) continue; // only resurrect grunts that are in play this level
+        if (body.enemyIndex >= waves.getLevelGruntsCount()) continue; // only resurrect grunts that are in play this level
         const d = pos.distanceTo(body.position);
         if (d < nearestDist) {
           nearestDist = d;
@@ -2678,7 +2641,7 @@ function updateResurrectors(dt: number, gameTime: number): void {
       let nearestDist = RESURRECT_RANGE;
       for (let b = 0; b < bodies.length; b++) {
         const body = bodies[b];
-        if (body.enemyIndex >= levelGruntsCount) continue;
+        if (body.enemyIndex >= waves.getLevelGruntsCount()) continue;
         const d = pos.distanceTo(body.position);
         if (d < nearestDist) {
           nearestDist = d;
@@ -3007,7 +2970,7 @@ let lastFrameTime = performance.now();
 let smoothedFps = 60;
 let gameTime = 0;
 
-startWave(1);
+waves.startWave(1);
 
 const sizeWarningEl = document.createElement('div');
 sizeWarningEl.style.cssText = 'position:absolute;bottom:10px;left:50%;transform:translateX(-50%);padding:6px 12px;background:rgba(0,0,0,0.8);color:#f88;font:12px sans-serif;border-radius:4px;display:none;z-index:5;pointer-events:none;';
@@ -3051,8 +3014,8 @@ const gameLoop = new GameLoop(
     }
     
     // Inferno-style: when all enemies dead, advance to next wave (no portal)
-    if (!isAnyEnemyAlive()) {
-      addChatMessage(`Wave ${currentWave} completed!`);
+    if (waves.isWaveComplete(() => isAnyEnemyAlive())) {
+      addChatMessage(`Wave ${waves.getCurrentWave()} completed!`);
       while (enemyFireballs.length > 0) {
         const ef = enemyFireballs.pop()!;
         scene.remove(ef.mesh);
@@ -3072,7 +3035,7 @@ const gameLoop = new GameLoop(
         (bf.indicatorInner.geometry as THREE.BufferGeometry).dispose();
         (bf.indicatorInner.material as THREE.Material).dispose();
       }
-      startWave(currentWave + 1);
+      waves.startWave(waves.getCurrentWave() + 1);
     }
     updateCharacterMove(dt);
     updatePlayerCollisions(dt);
