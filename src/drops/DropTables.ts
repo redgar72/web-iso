@@ -2,9 +2,9 @@
  * Drop tables per monster type. When a monster dies, roll its table to spawn a pickup.
  */
 
-export type DropType = 'health' | 'mana' | null;
+export type DropType = 'health' | 'mana' | 'coin' | null;
 
-export type MonsterType = 'redCube' | 'caster' | 'resurrector';
+export type MonsterType = 'redCube' | 'caster' | 'resurrector' | 'teleporter';
 
 interface DropEntry {
   chance: number;
@@ -14,19 +14,28 @@ interface DropEntry {
 /** Weighted drop table: chance should sum to 1. */
 const DROP_TABLES: Record<MonsterType, DropEntry[]> = {
   redCube: [
-    { chance: 0.55, drop: null },
-    { chance: 0.30, drop: 'health' },
-    { chance: 0.15, drop: 'mana' },
+    { chance: 0.48, drop: null },
+    { chance: 0.26, drop: 'health' },
+    { chance: 0.13, drop: 'mana' },
+    { chance: 0.13, drop: 'coin' },
   ],
   caster: [
-    { chance: 0.40, drop: null },
-    { chance: 0.25, drop: 'health' },
-    { chance: 0.35, drop: 'mana' },
+    { chance: 0.34, drop: null },
+    { chance: 0.22, drop: 'health' },
+    { chance: 0.30, drop: 'mana' },
+    { chance: 0.14, drop: 'coin' },
   ],
   resurrector: [
-    { chance: 0.35, drop: null },
-    { chance: 0.30, drop: 'health' },
-    { chance: 0.35, drop: 'mana' },
+    { chance: 0.30, drop: null },
+    { chance: 0.26, drop: 'health' },
+    { chance: 0.30, drop: 'mana' },
+    { chance: 0.14, drop: 'coin' },
+  ],
+  teleporter: [
+    { chance: 0.38, drop: null },
+    { chance: 0.22, drop: 'health' },
+    { chance: 0.26, drop: 'mana' },
+    { chance: 0.14, drop: 'coin' },
   ],
 };
 

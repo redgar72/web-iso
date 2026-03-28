@@ -18,6 +18,7 @@ export const SPAWN_POSITION_Z = 10;
 export const XP_RED_CUBE = 12;
 export const XP_CASTER = 35;
 export const XP_RESURRECTOR = 40;
+export const XP_TELEPORTER = 38;
 export const XP_PER_LEVEL_BASE = 80; // e.g. 80 to reach 2, 160 to reach 3
 
 // --- Enemy health bars (projected UI) ---
@@ -54,6 +55,37 @@ export const RESURRECTOR_SPEED = 1.8;
 export const RESURRECTOR_SIZE = 0.85;
 export const RESURRECTOR_PREFERRED_RANGE = 8;
 export const MAX_RESURRECTOR_HEALTH = 70;
+
+// --- Teleporter (poison) enemies ---
+export const TELEPORTER_COUNT = 3;
+export const TELEPORTER_SIZE = 0.65;
+export const TELEPORTER_TELEPORT_RANGE = 4;
+export const TELEPORTER_TELEPORT_COOLDOWN = 2;
+export const TELEPORTER_POISON_POOL_COOLDOWN = 5;
+export const POISON_THROW_DISTANCE = 7; // How far toward the player the pool lands
+export const POISON_POOL_RADIUS = 1.8;
+export const POISON_INDICATOR_DURATION = 1.2; // Seconds the "incoming" indicator shows before pool lands
+export const POISON_POOL_DURATION = 8;
+export const MAX_TELEPORTER_HEALTH = 50;
+export const POISON_DURATION = 4;
+export const POISON_DAMAGE_PER_TICK = 2;
+export const POISON_TICK_INTERVAL = 0.5;
+
+// --- Boss (center of map, exploding fireballs) ---
+export const BOSS_SIZE = 1.2;
+export const BOSS_POSITION_X = 24;
+export const BOSS_POSITION_Z = 24;
+export const BOSS_HITBOX_RADIUS = 6.0;
+export const MAX_BOSS_HEALTH = 500;
+export const BOSS_FIREBALL_COOLDOWN = 3.5;
+export const BOSS_FIREBALL_RADIUS = 0.4;
+export const BOSS_FIREBALL_DAMAGE = 15;
+export const BOSS_FIREBALL_EXPLOSION_RADIUS = 3.5;
+export const BOSS_FIREBALL_WARNING_DURATION = 2.0;
+export const BOSS_FIREBALL_BURN_DURATION = 4.0;
+export const BOSS_FIREBALL_BURN_DAMAGE_PER_SECOND = 3.0;
+export const BOSS_FIREBALL_BURN_TICK_INTERVAL = 0.5;
+export const XP_BOSS = 200;
 
 // --- Movement / terrain ---
 export const TERRAIN_XZ_MIN = 0;
@@ -115,3 +147,11 @@ export const MANA_ORB_VALUE = 12;
 export const ROCK_SPEED = 14;
 export const ROCK_RADIUS = 0.25;
 export const ROCK_TTL = 1.8;
+
+// --- Bow (arrow projectile) ---
+export const ARROW_SPEED = 28;
+export const ARROW_RADIUS = 0.2;
+export const ARROW_TTL = 1.5;
+
+// --- Sword (equipped swing animation) ---
+export const SWORD_SWING_DURATION = 0.3;

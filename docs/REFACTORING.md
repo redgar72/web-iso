@@ -34,7 +34,7 @@
 - **Option B (done):** Grunts stay in `scene/Enemies.ts`. `scene/Casters.ts` and `scene/Resurrectors.ts` export `createCasters(scene, config, callbacks)` and `createResurrectors(scene, config, callbacks)` with their own `update`, `damage`, `getCount`, `getPosition`, `isAlive`, `getHealth`, `getMesh`, `getEffects`, `clear`, and `spawn` APIs.
 - **Benefit:** main.ts stops being the only place that knows every enemy type; adding a new enemy is a new module.
 
-### 3. Combat / weapons
+### 3. ~~Combat / weapons~~ (done)
 - **Sword:** Move orbiting blades (creation, `updateSword`, hit detection) into e.g. `src/combat/Sword.ts`. It takes `scene`, `character`, and a callback `onHit(worldPos)` (or `damageInRadius`). Main wires that to `damageRedCube` / `damageCaster` / `damageResurrector`.
 - **Fireballs / rocks:** Same idea: `src/combat/Fireballs.ts` and `src/combat/Rocks.ts` (or one `Projectiles.ts`) that own meshes, velocity, and collision; they call a provided `onHit(entityType, index, position)` (and optionally `applyBurn`).
 - **Benefit:** main.ts becomes “wire combat to damage/effects” instead of “implement all combat”.
@@ -44,13 +44,21 @@
 - **Expose:** `startWave(waveNumber)` and `isWaveComplete()` (or `isAnyEnemyAlive()`). Wave module calls into enemy manager (or main) to spawn/kill/clear.
 - **Benefit:** Wave rules and composition live in one place; main just checks “wave complete?” and calls `startWave(next)`.
 
-### 5. HUD / UI
+### 5. ~~HUD / UI~~ (done)
 - **Move:** Health/mana/XP bars, timer, FPS, enemy health bar container, and their update logic into `src/ui/HUD.ts` or `src/ui/GameHUD.ts`. It receives “current health/max”, “current mana/max”, “xp/needed”, “run time”, and camera/canvas for projecting enemy bars.
 - **Benefit:** main only updates state and calls `hud.update(...)`; all bar/timer DOM lives in one module.
 
-### 6. Burn visuals
+### 6. ~~Burn visuals~~ (done)
 - **Move:** Burn overlay InstancedMesh and `updateBurnVisuals` into `src/effects/BurnVisuals.ts`. It takes scene, counts (ENEMY_COUNT, etc.), and a “state getter” (alive arrays, effect arrays, positions, caster/resurrector meshes) and exposes `update(gameTime)`.
 - **Benefit:** Effect visuals live next to effect logic; main only passes state and calls update.
+
+### 7. ~~Boss~~ (done)
+- **Move:** Boss mesh, hitbox indicator, fireball projectiles and ground indicators into `src/scene/Boss.ts`. `createBoss(scene, callbacks)` returns getPosition, isAlive, getHealth, getMaxHealth, getHitboxRadius, damage, spawn, update, clearFireballs, getHitboxIndicator. Main wires callbacks for player damage, burn, hit markers, death (XP + drop), and explosion effects.
+- **Benefit:** Boss logic and visuals live in one module; main only passes callbacks and calls update/clearFireballs.
+
+### 8. ~~Teleporters~~ (done)
+- **Move:** Teleporter sprites, health, teleport/poison AI into `src/scene/Teleporters.ts`. `createTeleporters(scene, callbacks)` returns getCount, getPosition(s), getPositions, isAlive, getAlive, getHealth/ getHealthArray, getMaxHealth, damage, update, clear, spawn. Callbacks: onCreateHitMarker, onDeath, addIncomingPoisonPool (delegates to PoisonPools).
+- **Benefit:** Teleporter logic and visuals in one module; main wires callbacks and calls update/clear/spawn.
 
 ---
 

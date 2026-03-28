@@ -8,12 +8,14 @@ import {
   BATTLE_MIN,
   BATTLE_MAX,
   RESURRECTOR_COUNT,
+  TELEPORTER_COUNT,
 } from '../config/Constants';
 
 export interface WaveComposition {
   grunts: number;
   casters: number;
   resurrectors: number;
+  teleporters: number;
 }
 
 export interface WaveSpawnPosition {
@@ -41,17 +43,19 @@ function seededRandom(seed: number): () => number {
   };
 }
 
-/** Wave 1: 1 of every monster. Wave 2: 2 grunts. Wave 3: 1 caster. Wave 4: 2 casters. Wave 5+: grunts + 2 casters + resurrector(s). */
+/** Wave 1: 1 of every monster. Wave 2: 2 grunts. Wave 3: 1 caster. Wave 4: 2 casters. Wave 5+: grunts + 2 casters + resurrector(s) + teleporter(s). */
 export function getWaveComposition(wave: number): WaveComposition {
   if (wave >= 5) {
     const resurrectors = Math.min(1 + Math.floor((wave - 5) / 2), RESURRECTOR_COUNT);
+    const teleporters = Math.min(1 + Math.floor((wave - 5) / 3), TELEPORTER_COUNT);
     const grunts = Math.min(1 + (wave - 5), 4);
-    return { grunts, casters: 2, resurrectors };
+    return { grunts, casters: 2, resurrectors, teleporters };
   }
-  if (wave === 1) return { grunts: 1, casters: 1, resurrectors: 1 };
-  if (wave === 2) return { grunts: 2, casters: 0, resurrectors: 0 };
-  if (wave === 3) return { grunts: 0, casters: 1, resurrectors: 0 };
-  return { grunts: 0, casters: 2, resurrectors: 0 }; // wave 4
+  if (wave === 1) return { grunts: 1, casters: 1, resurrectors: 1, teleporters: 1 };
+  if (wave === 2) return { grunts: 2, casters: 0, resurrectors: 0, teleporters: 1 };
+  if (wave === 3) return { grunts: 0, casters: 1, resurrectors: 0, teleporters: 1 };
+  if (wave === 4) return { grunts: 0, casters: 2, resurrectors: 0, teleporters: 1 };
+  return { grunts: 0, casters: 2, resurrectors: 0, teleporters: 0 };
 }
 
 export function getWaveSpawnPosition(wave: number, index: number, out: WaveSpawnPosition): void {
@@ -68,6 +72,7 @@ export interface WavesAPI {
   getLevelGruntsCount(): number;
   getLevelCastersCount(): number;
   getLevelResurrectorsCount(): number;
+  getLevelTeleportersCount(): number;
   startWave(wave: number): void;
   isWaveComplete(checkAlive: () => boolean): boolean;
 }
@@ -83,6 +88,9 @@ export function createWaves(callbacks: WaveCallbacks): WavesAPI {
   }
   function getLevelResurrectorsCount(): number {
     return getWaveComposition(currentWave).resurrectors;
+  }
+  function getLevelTeleportersCount(): number {
+    return getWaveComposition(currentWave).teleporters;
   }
 
   function startWave(wave: number): void {
@@ -104,6 +112,7 @@ export function createWaves(callbacks: WaveCallbacks): WavesAPI {
     getLevelGruntsCount,
     getLevelCastersCount,
     getLevelResurrectorsCount,
+    getLevelTeleportersCount,
     startWave,
     isWaveComplete,
   };

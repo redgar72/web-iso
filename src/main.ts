@@ -21,8 +21,52 @@ import {
   type AugmentId,
 } from './skills/SkillTree';
 import { createWaves } from './game/Waves';
+import { createEquipment } from './state/Equipment';
+import { createInventory, INVENTORY_SLOTS } from './state/Inventory';
+import { EQUIPMENT_SLOT_ORDER, getItemDef, type ItemId, type EquipmentSlotId } from './items/ItemTypes';
+import { createSword } from './combat/Sword';
+import { createFireballs, createRocks, createArrows } from './combat/Projectiles';
+import type { CombatState } from './combat/types';
+import {
+  SWORD_ORBIT_RADIUS,
+  SWORD_HIT_RADIUS,
+  SWORD_HIT_COOLDOWN,
+  FIREBALL_RADIUS as CONST_FIREBALL_RADIUS,
+  EXPLOSION_MAX_SCALE as CONST_EXPLOSION_MAX_SCALE,
+  TELEPORTER_COUNT,
+  TELEPORTER_SIZE,
+  TELEPORTER_TELEPORT_RANGE,
+  TELEPORTER_TELEPORT_COOLDOWN,
+  TELEPORTER_POISON_POOL_COOLDOWN,
+  POISON_THROW_DISTANCE,
+  POISON_POOL_RADIUS,
+  POISON_INDICATOR_DURATION,
+  POISON_POOL_DURATION,
+  POISON_DURATION,
+  POISON_DAMAGE_PER_TICK,
+  POISON_TICK_INTERVAL,
+  MAX_TELEPORTER_HEALTH,
+  XP_TELEPORTER,
+  BATTLE_MIN,
+  BATTLE_MAX,
+  XP_BOSS,
+  BOSS_FIREBALL_BURN_DURATION,
+  BOSS_FIREBALL_BURN_TICK_INTERVAL,
+  BOSS_FIREBALL_BURN_DAMAGE_PER_SECOND,
+} from './config/Constants';
+import { createBoss, type BossApi } from './scene/Boss';
+import { createTeleporters, type TeleporterAPI } from './scene/Teleporters';
+import { createHUD, type HUDState } from './ui/HUD';
+import { createPlayerBurnVisuals } from './effects/BurnVisuals';
+import { createPlayerPoisonVisuals } from './effects/PoisonVisuals';
+import { createPoisonPools } from './effects/PoisonPools';
+import { createGroundItems } from './world/GroundItems';
 
 const container = document.getElementById('app')!;
+
+// Equipment & inventory (sword equipped by default; bow in inventory for testing)
+const equipment = createEquipment('sword');
+const inventory = createInventory(['bow']);
 let width = container.clientWidth;
 let height = container.clientHeight;
 
@@ -73,12 +117,7 @@ canvas.addEventListener('webglcontextrestored', () => {
   console.log('WebGL context restored');
 });
 
-const fpsEl = document.createElement('div');
-fpsEl.id = 'fps';
-fpsEl.textContent = '— FPS';
-container.appendChild(fpsEl);
-
-// Run timer (resets on respawn; best time persisted for competition)
+// Run timer (resets on respawn; best time persisted for competition). FPS/timer display in HUD.
 const BEST_TIME_KEY = 'web-iso-best-time';
 function formatTime(seconds: number): string {
   const m = Math.floor(seconds / 60);
@@ -95,12 +134,8 @@ function setBestTime(seconds: number): void {
   localStorage.setItem(BEST_TIME_KEY, String(seconds));
 }
 let runTime = 0;
-const timerEl = document.createElement('div');
-timerEl.id = 'timer';
-timerEl.textContent = 'Time: 0:00';
-container.appendChild(timerEl);
 
-// Health & Mana bars
+// Health & Mana bars (DOM moved to HUD; state stays here)
 const BASE_MAX_HEALTH = 100;
 const MAX_MANA = 100;
 let mana = MAX_MANA;
@@ -131,89 +166,47 @@ function getXpForNextLevel(): number {
 
 let health = getMaxHealth();
 
-const barsEl = document.createElement('div');
-barsEl.style.cssText = 'position:absolute;bottom:12px;left:12px;z-index:5;display:flex;flex-direction:column;gap:8px;pointer-events:none;';
-const barStyle = 'width:180px;height:14px;background:rgba(0,0,0,0.6);border-radius:7px;overflow:hidden;border:1px solid rgba(255,255,255,0.15);';
-const fillStyle = 'height:100%;border-radius:6px;transition:width 0.15s ease-out;';
-
-const healthBarWrap = document.createElement('div');
-healthBarWrap.style.cssText = barStyle + 'pointer-events:auto;cursor:default;';
-healthBarWrap.title = `${health} / ${getMaxHealth()}`;
-const healthFill = document.createElement('div');
-healthFill.style.cssText = `width:100%;background:linear-gradient(90deg,#c04040,#e06060);${fillStyle}`;
-healthBarWrap.appendChild(healthFill);
-
-const manaBarWrap = document.createElement('div');
-manaBarWrap.style.cssText = barStyle + 'pointer-events:auto;cursor:default;';
-manaBarWrap.title = `${mana} / ${MAX_MANA}`;
-const manaFill = document.createElement('div');
-manaFill.style.cssText = `width:100%;background:linear-gradient(90deg,#3060a0,#50a0e0);${fillStyle}`;
-manaBarWrap.appendChild(manaFill);
-
-const healthLabel = document.createElement('div');
-healthLabel.style.cssText = 'font:11px sans-serif;color:rgba(255,255,255,0.85);margin-bottom:2px;';
-healthLabel.textContent = 'Health';
-const manaLabel = document.createElement('div');
-manaLabel.style.cssText = 'font:11px sans-serif;color:rgba(255,255,255,0.85);margin-bottom:2px;';
-manaLabel.textContent = 'Mana';
-barsEl.appendChild(healthLabel);
-barsEl.appendChild(healthBarWrap);
-barsEl.appendChild(manaLabel);
-barsEl.appendChild(manaBarWrap);
-// Stats display (Str / Int / Dex / Vit)
-const statsEl = document.createElement('div');
-statsEl.style.cssText = 'display:flex;gap:12px;font:11px sans-serif;color:rgba(255,255,255,0.85);margin-top:6px;';
-const statLabel = (name: string, value: number, title: string) => {
-  const s = document.createElement('span');
-  s.title = title;
-  s.textContent = `${name} ${value}`;
-  return s;
-};
-const strengthEl = statLabel('Str', strength, 'Melee damage');
-const intelligenceEl = statLabel('Int', intelligence, 'Magic damage');
-const dexterityEl = statLabel('Dex', dexterity, 'Ranged damage');
-const vitalityEl = statLabel('Vit', vitality, 'Max health');
-statsEl.appendChild(strengthEl);
-statsEl.appendChild(intelligenceEl);
-statsEl.appendChild(dexterityEl);
-statsEl.appendChild(vitalityEl);
-barsEl.appendChild(statsEl);
-
-function updateStatsDisplay(): void {
-  strengthEl.textContent = `Str ${strength}`;
-  intelligenceEl.textContent = `Int ${intelligence}`;
-  dexterityEl.textContent = `Dex ${dexterity}`;
-  vitalityEl.textContent = `Vit ${vitality}`;
+// Equipment panel (equipped items - always visible). Inserted into HUD bars root after HUD creation.
+const equipmentPanelEl = document.createElement('div');
+equipmentPanelEl.style.cssText = 'display:flex;flex-direction:column;gap:6px;margin-bottom:12px;';
+const equipmentLabelEl = document.createElement('div');
+equipmentLabelEl.style.cssText = 'font:11px sans-serif;color:rgba(255,255,255,0.85);';
+equipmentLabelEl.textContent = 'Equipment';
+equipmentPanelEl.appendChild(equipmentLabelEl);
+const equipmentSlotsEl = document.createElement('div');
+equipmentSlotsEl.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;';
+const SLOT_SIZE = 44;
+const slotStyle = `width:${SLOT_SIZE}px;height:${SLOT_SIZE}px;background:rgba(0,0,0,0.5);border:2px solid rgba(255,255,255,0.25);border-radius:8px;display:flex;align-items:center;justify-content:center;font:11px sans-serif;color:rgba(255,255,255,0.9);cursor:pointer;transition:border-color 0.15s,background 0.15s;`;
+function renderEquipmentPanel(): void {
+  equipmentSlotsEl.innerHTML = '';
+  for (const slotId of EQUIPMENT_SLOT_ORDER) {
+    const slotDiv = document.createElement('div');
+    slotDiv.title = slotId === 'weapon' ? 'Weapon' : slotId;
+    slotDiv.style.cssText = slotStyle;
+    const itemId = equipment.getEquipped(slotId);
+    if (itemId) {
+      const def = getItemDef(itemId);
+      slotDiv.textContent = def.label;
+      slotDiv.style.background = 'rgba(60,80,120,0.5)';
+      slotDiv.style.borderColor = 'rgba(255,255,255,0.4)';
+      slotDiv.addEventListener('click', () => {
+        const firstEmpty = inventory.findFirstEmpty();
+        if (firstEmpty >= 0) {
+          equipment.setEquipped(slotId, null);
+          inventory.setSlot(firstEmpty, { itemId, count: 1 });
+        }
+      });
+    } else {
+      slotDiv.textContent = slotId === 'weapon' ? 'Weapon' : slotId;
+      slotDiv.style.color = 'rgba(255,255,255,0.45)';
+    }
+    equipmentSlotsEl.appendChild(slotDiv);
+  }
 }
-updateStatsDisplay();
-
-// Level & XP bar
-const levelXpEl = document.createElement('div');
-levelXpEl.style.cssText = 'display:flex;flex-direction:column;gap:4px;margin-top:8px;';
-const levelLabel = document.createElement('div');
-levelLabel.style.cssText = 'font:11px sans-serif;color:rgba(255,255,255,0.9);';
-levelLabel.textContent = `Level ${level}`;
-const xpBarWrap = document.createElement('div');
-xpBarWrap.style.cssText = barStyle;
-xpBarWrap.title = `${xp} / ${getXpForNextLevel()} XP`;
-const xpFill = document.createElement('div');
-xpFill.style.cssText = `width:0%;background:linear-gradient(90deg,#c0a030,#e8c050);${fillStyle}`;
-xpBarWrap.appendChild(xpFill);
-levelXpEl.appendChild(levelLabel);
-levelXpEl.appendChild(xpBarWrap);
-barsEl.appendChild(levelXpEl);
-const skillTreeHintBar = document.createElement('div');
-skillTreeHintBar.textContent = 'Space — Melee  |  K — Skill tree';
-skillTreeHintBar.style.cssText = 'font:10px sans-serif;color:rgba(255,255,255,0.5);margin-top:4px;';
-barsEl.appendChild(skillTreeHintBar);
-const waveLabelEl = document.createElement('div');
-waveLabelEl.style.cssText = 'font:10px sans-serif;color:rgba(255,255,255,0.6);margin-top:6px;margin-bottom:2px;';
-waveLabelEl.textContent = 'Current wave';
-const waveEl = document.createElement('div');
-waveEl.style.cssText = 'font:14px sans-serif;color:#e8c050;font-weight:bold;';
-waveEl.textContent = '1';
-barsEl.appendChild(waveLabelEl);
-barsEl.appendChild(waveEl);
+equipment.subscribe(renderEquipmentPanel);
+renderEquipmentPanel();
+equipmentPanelEl.appendChild(equipmentSlotsEl);
+// Wave display and bars root come from HUD; equipment panel is inserted there after createHUD()
 
 // Prayer system (RuneScape-style)
 type PrayerType = 'melee' | 'mage' | 'range' | null;
@@ -305,14 +298,13 @@ function addChatMessage(text: string): void {
 }
 
 function updateXpDisplay(): void {
-  const needed = getXpForNextLevel();
-  levelLabel.textContent = `Level ${level}`;
-  xpFill.style.width = `${needed > 0 ? (xp / needed) * 100 : 0}%`;
-  xpBarWrap.title = `${xp} / ${needed} XP`;
+  // No-op: HUD shows XP from state each frame
 }
-updateXpDisplay();
+function updateStatsDisplay(): void {
+  // No-op: HUD shows stats from state each frame
+}
 
-container.appendChild(barsEl);
+// barsEl replaced by HUD; equipment panel inserted into HUD after createHUD()
 
 // Game over state & overlay
 const SPAWN_POSITION = new THREE.Vector3(10, 0, 10);
@@ -364,6 +356,7 @@ function respawn(): void {
   character.position.copy(SPAWN_POSITION);
   moveTarget = null;
   playerBurning = false; // Clear burning on respawn
+  playerPoisoned = false; // Clear poison on respawn
   activePrayer = null; // Clear prayer on respawn
   updatePrayerButtons();
   waves.startWave(1);
@@ -582,6 +575,102 @@ function renderSkillTree(): void {
 skillTreeEl.addEventListener('click', (e) => {
   if (e.target === skillTreeEl) setSkillTreeOpen(false);
 });
+
+// Inventory popup (I to open/close) — floating window, game keeps running
+const inventoryEl = document.createElement('div');
+inventoryEl.id = 'inventory';
+inventoryEl.style.cssText =
+  'position:absolute;top:12px;right:12px;z-index:18;display:none;flex-direction:column;';
+const inventoryPanel = document.createElement('div');
+inventoryPanel.style.cssText =
+  'background:linear-gradient(180deg,#2a2630 0%,#1e1a24 100%);border:2px solid rgba(255,255,255,0.2);border-radius:12px;padding:24px;min-width:200px;box-shadow:0 8px 32px rgba(0,0,0,0.5);';
+const inventoryTitle = document.createElement('div');
+inventoryTitle.textContent = 'Inventory';
+inventoryTitle.style.cssText = 'font:20px sans-serif;color:#e8e0e0;font-weight:bold;margin-bottom:12px;';
+const inventoryEquipmentRow = document.createElement('div');
+inventoryEquipmentRow.style.cssText = 'display:flex;align-items:center;gap:12px;margin-bottom:16px;';
+const inventoryEquipmentLabel = document.createElement('div');
+inventoryEquipmentLabel.style.cssText = 'font:12px sans-serif;color:rgba(255,255,255,0.8);min-width:56px;';
+inventoryEquipmentLabel.textContent = 'Equipped';
+inventoryEquipmentRow.appendChild(inventoryEquipmentLabel);
+const inventoryEquipmentSlots = document.createElement('div');
+inventoryEquipmentSlots.style.cssText = 'display:flex;gap:8px;';
+const inventoryGridEl = document.createElement('div');
+inventoryGridEl.style.cssText = 'display:grid;gap:6px;';
+const INV_SLOT_SIZE = 40;
+const invSlotStyle = `width:${INV_SLOT_SIZE}px;height:${INV_SLOT_SIZE}px;background:rgba(0,0,0,0.5);border:2px solid rgba(255,255,255,0.2);border-radius:6px;display:flex;align-items:center;justify-content:center;font:10px sans-serif;color:rgba(255,255,255,0.9);cursor:pointer;transition:border-color 0.15s,background 0.15s;box-sizing:border-box;`;
+const inventoryHint = document.createElement('div');
+inventoryHint.textContent = 'Press I to close';
+inventoryHint.style.cssText = 'font:11px sans-serif;color:rgba(255,255,255,0.5);margin-top:12px;';
+
+function renderInventoryModal(): void {
+  inventoryEquipmentSlots.innerHTML = '';
+  for (const slotId of EQUIPMENT_SLOT_ORDER) {
+    const slotDiv = document.createElement('div');
+    slotDiv.title = slotId === 'weapon' ? 'Weapon' : slotId;
+    slotDiv.style.cssText = invSlotStyle;
+    const itemId = equipment.getEquipped(slotId);
+    if (itemId) {
+      const def = getItemDef(itemId);
+      slotDiv.textContent = def.label;
+      slotDiv.style.background = 'rgba(60,80,120,0.5)';
+      slotDiv.style.borderColor = 'rgba(255,255,255,0.4)';
+      slotDiv.addEventListener('click', () => {
+        const firstEmpty = inventory.findFirstEmpty();
+        if (firstEmpty >= 0) {
+          equipment.setEquipped(slotId, null);
+          inventory.setSlot(firstEmpty, { itemId, count: 1 });
+        }
+      });
+    } else {
+      slotDiv.textContent = slotId === 'weapon' ? '—' : '—';
+      slotDiv.style.color = 'rgba(255,255,255,0.4)';
+    }
+    inventoryEquipmentSlots.appendChild(slotDiv);
+  }
+  inventoryGridEl.innerHTML = '';
+  inventoryGridEl.style.gridTemplateColumns = `repeat(${inventory.getColumns()}, ${INV_SLOT_SIZE}px)`;
+  for (let i = 0; i < INVENTORY_SLOTS; i++) {
+    const cell = document.createElement('div');
+    cell.style.cssText = invSlotStyle;
+    const stack = inventory.getSlot(i);
+    if (stack) {
+      const def = getItemDef(stack.itemId);
+      cell.textContent = stack.count > 1 ? `${def.label} ×${stack.count}` : def.label;
+      cell.style.background = 'rgba(40,60,90,0.6)';
+      cell.style.borderColor = 'rgba(255,255,255,0.3)';
+      cell.addEventListener('click', () => {
+        if (def.slot === 'weapon') {
+          const current = equipment.getEquipped('weapon');
+          equipment.setEquipped('weapon', stack.itemId);
+          inventory.setSlot(i, current ? { itemId: current, count: 1 } : null);
+        }
+      });
+    } else {
+      cell.style.color = 'rgba(255,255,255,0.3)';
+      cell.textContent = '';
+    }
+    inventoryGridEl.appendChild(cell);
+  }
+}
+equipment.subscribe(renderInventoryModal);
+inventory.subscribe(renderInventoryModal);
+
+inventoryPanel.appendChild(inventoryTitle);
+inventoryEquipmentRow.appendChild(inventoryEquipmentSlots);
+inventoryPanel.appendChild(inventoryEquipmentRow);
+inventoryPanel.appendChild(inventoryGridEl);
+inventoryPanel.appendChild(inventoryHint);
+inventoryEl.appendChild(inventoryPanel);
+container.appendChild(inventoryEl);
+
+let inventoryOpen = false;
+function setInventoryOpen(open: boolean): void {
+  inventoryOpen = open;
+  inventoryEl.style.display = open ? 'flex' : 'none';
+  if (open) renderInventoryModal();
+}
+
 levelUpNotifier.callback = () => {
   if (getSkillPoints() > 0 || statPointsToAllocate > 0) setSkillTreeOpen(true);
 };
@@ -592,32 +681,7 @@ function setPaused(paused: boolean): void {
   pauseEl.style.display = isPaused ? 'flex' : 'none';
 }
 
-// Enemy health bars (above each enemy, updated in render)
-const enemyHealthBarsContainer = document.createElement('div');
-enemyHealthBarsContainer.style.cssText = 'position:absolute;inset:0;z-index:4;pointer-events:none;';
-const ENEMY_HEALTH_BAR_WIDTH = 36;
-const ENEMY_HEALTH_BAR_HEIGHT = 5;
-const enemyHealthBarEls: { wrap: HTMLDivElement; fill: HTMLDivElement }[] = [];
-const casterHealthBarEls: { wrap: HTMLDivElement; fill: HTMLDivElement }[] = [];
-const resurrectorHealthBarEls: { wrap: HTMLDivElement; fill: HTMLDivElement }[] = [];
-const healthBarProjectionVec = new THREE.Vector3();
-const HEALTH_BAR_Y_OFFSET = 1.2;
-
-function createEnemyHealthBar(): { wrap: HTMLDivElement; fill: HTMLDivElement } {
-  const wrap = document.createElement('div');
-  wrap.style.cssText = `position:absolute;width:${ENEMY_HEALTH_BAR_WIDTH}px;height:${ENEMY_HEALTH_BAR_HEIGHT}px;background:rgba(0,0,0,0.7);border-radius:2px;overflow:hidden;visibility:hidden;`;
-  const fill = document.createElement('div');
-  fill.style.cssText = 'height:100%;background:linear-gradient(90deg,#c04040,#e06060);border-radius:2px;transition:width 0.08s;';
-  wrap.appendChild(fill);
-  return { wrap, fill };
-}
-
-for (let j = 0; j < ENEMY_COUNT; j++) {
-  const bar = createEnemyHealthBar();
-  enemyHealthBarsContainer.appendChild(bar.wrap);
-  enemyHealthBarEls.push(bar);
-}
-container.appendChild(enemyHealthBarsContainer);
+// Enemy health bars moved to HUD (createHUD below)
 
 // Floating combat hit markers
 const hitMarkersContainer = document.createElement('div');
@@ -715,8 +779,6 @@ function setHealth(value: number): void {
     createHitMarker(character.position, damage);
   }
   
-  healthFill.style.width = `${(health / max) * 100}%`;
-  healthBarWrap.title = `${health} / ${max}`;
   if (health <= 0) showGameOver();
 }
 
@@ -741,8 +803,6 @@ function addXp(amount: number): void {
 
 function setMana(value: number): void {
   mana = Math.max(0, Math.min(MAX_MANA, value));
-  manaFill.style.width = `${(mana / MAX_MANA) * 100}%`;
-  manaBarWrap.title = `${mana} / ${MAX_MANA}`;
 }
 const isoCamera = new IsoCamera(width, height);
 isoCamera.setWorldFocus(10, 0, 10);
@@ -760,91 +820,7 @@ createIsoLights(scene);
 const character = createPlaceholderCharacter([10, 0, 10]);
 scene.add(character);
 
-// Burning effect particles
-const burningParticlesGroup = new THREE.Group();
-scene.add(burningParticlesGroup);
-const burningParticles: THREE.Mesh[] = [];
-
-function createBurningParticle(): THREE.Mesh {
-  const geometry = new THREE.SphereGeometry(0.05, 6, 6);
-  const material = new THREE.MeshBasicMaterial({
-    color: 0xff4400,
-    transparent: true,
-    opacity: 0.8,
-  });
-  return new THREE.Mesh(geometry, material);
-}
-
-function updateBurningEffect(gameTime: number): void {
-  // Remove old particles
-  for (const particle of burningParticles) {
-    burningParticlesGroup.remove(particle);
-    (particle.geometry as THREE.BufferGeometry).dispose();
-    (particle.material as THREE.Material).dispose();
-  }
-  burningParticles.length = 0;
-  
-  if (!playerBurning) return;
-  
-  // Create particles around character
-  const particleCount = 8;
-  const charPos = character.position;
-  const burnAge = gameTime - playerBurnStartTime;
-  const burnProgress = burnAge / BOSS_FIREBALL_BURN_DURATION;
-  
-  for (let i = 0; i < particleCount; i++) {
-    const angle = (i / particleCount) * Math.PI * 2;
-    const radius = 0.4 + Math.sin(burnProgress * Math.PI * 4 + angle) * 0.1;
-    const height = 0.3 + Math.sin(burnProgress * Math.PI * 6 + angle * 2) * 0.2;
-    
-    const particle = createBurningParticle();
-    particle.position.set(
-      charPos.x + Math.cos(angle) * radius,
-      charPos.y + height,
-      charPos.z + Math.sin(angle) * radius
-    );
-    
-    // Fade out as burn ends
-    const mat = particle.material as THREE.MeshBasicMaterial;
-    mat.opacity = 0.8 * (1 - burnProgress);
-    
-    burningParticlesGroup.add(particle);
-    burningParticles.push(particle);
-  }
-  
-  // Add emissive glow to character when burning
-  character.traverse((child) => {
-    if (child instanceof THREE.Mesh && child.material instanceof THREE.MeshStandardMaterial) {
-      const mat = child.material;
-      if (playerBurning) {
-        mat.emissive.setHex(0xff2200);
-        mat.emissiveIntensity = 0.3 + Math.sin(burnProgress * Math.PI * 8) * 0.2;
-      } else {
-        mat.emissive.setHex(0x000000);
-        mat.emissiveIntensity = 0;
-      }
-    }
-  });
-}
-
-// Equipped sword (held by character, swings during melee attacks)
-const equippedSword = createSwordMesh();
-equippedSword.position.set(0.3, 0.4, -0.2); // Position at character's side/hip
-equippedSword.rotation.set(0, Math.PI / 4, -Math.PI / 6); // Angle it naturally
-character.add(equippedSword);
-
-// Sword swing animation state
-let swordSwingStartTime = -999;
-const SWORD_SWING_DURATION = 0.3; // Duration of swing animation
-const SWORD_IDLE_ROTATION = { x: 0, y: Math.PI / 4, z: -Math.PI / 6 };
-const SWORD_IDLE_POSITION = { x: 0.3, y: 0.4, z: -0.2 };
-
-// Orbiting sword (orbits character, damages enemies on contact)
-const SWORD_ORBIT_RADIUS = 1.4;
-const SWORD_ANGULAR_SPEED = Math.PI * 2; // one full rotation per second
-const SWORD_HIT_RADIUS = 0.6;
-const SWORD_HIT_COOLDOWN = 0.4; // seconds before same enemy can be hit again
-
+// Sword orbit radius/hit/cooldown (augment modifiers) — passed to combat/Sword
 function getSwordOrbitRadius(): number {
   return isAugmentUnlocked('sword_whirl' as AugmentId) ? SWORD_ORBIT_RADIUS * 1.25 : SWORD_ORBIT_RADIUS;
 }
@@ -855,44 +831,6 @@ function getSwordHitCooldown(): number {
   return isAugmentUnlocked('sword_quickslash' as AugmentId) ? SWORD_HIT_COOLDOWN * 0.6 : SWORD_HIT_COOLDOWN;
 }
 
-function createSwordMesh(): THREE.Group {
-  const group = new THREE.Group();
-  const blade = new THREE.Mesh(
-    new THREE.BoxGeometry(0.08, 0.08, 0.7),
-    new THREE.MeshStandardMaterial({ color: 0x888899, metalness: 0.6, roughness: 0.4 })
-  );
-  blade.position.z = 0.35;
-  blade.castShadow = true;
-  const handle = new THREE.Mesh(
-    new THREE.BoxGeometry(0.12, 0.12, 0.25),
-    new THREE.MeshStandardMaterial({ color: 0x4a3728, metalness: 0.2, roughness: 0.8 })
-  );
-  handle.position.z = 0.125;
-  handle.castShadow = true;
-  group.add(blade);
-  group.add(handle);
-  return group;
-}
-
-const swordOrbit = new THREE.Group();
-const swordMesh = createSwordMesh();
-swordMesh.position.set(SWORD_ORBIT_RADIUS, 0.6, 0);
-swordMesh.rotation.y = Math.PI / 2;
-swordOrbit.add(swordMesh);
-swordOrbit.visible = false;
-scene.add(swordOrbit);
-
-const swordOrbit2 = new THREE.Group();
-const swordMesh2 = createSwordMesh();
-swordMesh2.position.set(SWORD_ORBIT_RADIUS, 0.6, 0);
-swordMesh2.rotation.y = Math.PI / 2;
-swordOrbit2.add(swordMesh2);
-swordOrbit2.visible = false;
-scene.add(swordOrbit2);
-
-const swordWorldPos = new THREE.Vector3();
-const swordWorldPos2 = new THREE.Vector3();
-const lastSwordHitByEnemy: number[] = Array(ENEMY_COUNT).fill(-999);
 const lastEnemyDamageTime: number[] = Array(ENEMY_COUNT).fill(-999);
 
 // Caster enemies: purple capsules that throw fireballs at the player
@@ -951,12 +889,6 @@ function damageCaster(c: number, amount: number): boolean {
   return false;
 }
 
-for (let c = 0; c < CASTER_COUNT; c++) {
-  const bar = createEnemyHealthBar();
-  bar.fill.style.background = 'linear-gradient(90deg,#8040a0,#b060c0)';
-  enemyHealthBarsContainer.appendChild(bar.wrap);
-  casterHealthBarEls.push(bar);
-}
 scene.add(casterGroup);
 
 // Resurrector enemies: resurrect fallen grunts (spawn from wave 5, after double casters)
@@ -1006,167 +938,49 @@ function damageResurrector(r: number, amount: number): boolean {
   return false;
 }
 
-for (let r = 0; r < RESURRECTOR_COUNT; r++) {
-  const bar = createEnemyHealthBar();
-  bar.fill.style.background = 'linear-gradient(90deg,#2d5a4a,#4a7a6a)';
-  enemyHealthBarsContainer.appendChild(bar.wrap);
-  resurrectorHealthBarEls.push(bar);
-}
 scene.add(resurrectorGroup);
 
-// Boss: stationary in the middle of the map, throws exploding fireballs
-const BOSS_SIZE = 1.2;
-const BOSS_POSITION = new THREE.Vector3(24, 0, 24); // Center of 48x48 map
-const BOSS_HITBOX_RADIUS = 6.0; // Circular hitbox radius
-const MAX_BOSS_HEALTH = 500;
-let bossHealth = MAX_BOSS_HEALTH;
-let bossAlive = false;
-const BOSS_FIREBALL_COOLDOWN = 3.5;
-const BOSS_FIREBALL_RADIUS = 0.4;
-const BOSS_FIREBALL_DAMAGE = 15;
-const BOSS_FIREBALL_EXPLOSION_RADIUS = 3.5;
-const BOSS_FIREBALL_WARNING_DURATION = 2.0; // Time from indicator to explosion (also travel time)
-const BOSS_FIREBALL_BURN_DURATION = 4.0; // How long player burns for
-const BOSS_FIREBALL_BURN_DAMAGE_PER_SECOND = 3.0; // Damage per second while burning
-const BOSS_FIREBALL_BURN_TICK_INTERVAL = 0.5; // Damage tick interval
-let lastBossFireballTime = -999;
+// Teleporters created after trySpawnDrop (need callbacks); poison pools first so teleporters can register pools
+let teleportersApi: TeleporterAPI;
+
+const poisonPoolsApi = createPoisonPools(scene, {
+  radius: POISON_POOL_RADIUS,
+  duration: POISON_POOL_DURATION,
+  indicatorDuration: POISON_INDICATOR_DURATION,
+});
+
+const hud = createHUD(container, {
+  enemyCount: ENEMY_COUNT,
+  casterCount: CASTER_COUNT,
+  resurrectorCount: RESURRECTOR_COUNT,
+  teleporterCount: TELEPORTER_COUNT,
+});
+hud.getBarsRoot().insertBefore(equipmentPanelEl, hud.getBarsRoot().firstChild);
+
+// Boss is created later (after trySpawnDrop); API used for combat and HUD
+let bossApi: BossApi;
 
 // Player burning status
 let playerBurning = false;
 let playerBurnStartTime = -999;
 let lastBurnTickTime = -999;
 
-const bossGroup = new THREE.Group();
-let bossMesh: THREE.Mesh | null = null;
+const playerBurnVisuals = createPlayerBurnVisuals(scene, () => ({
+  playerBurning,
+  playerBurnStartTime,
+  burnDuration: BOSS_FIREBALL_BURN_DURATION,
+  character,
+}));
 
-// Create boss mesh (larger, more menacing)
-function createBossMesh(): THREE.Mesh {
-  const mesh = new THREE.Mesh(
-    new THREE.ConeGeometry(BOSS_SIZE * 0.6, BOSS_SIZE * 1.5, 8),
-    new THREE.MeshStandardMaterial({ 
-      color: 0x8b0000, 
-      roughness: 0.6, 
-      metalness: 0.2, 
-      emissive: 0x4a0000,
-      emissiveIntensity: 0.3
-    })
-  );
-  mesh.position.copy(BOSS_POSITION);
-  mesh.position.y = (BOSS_SIZE / 2) * 10; // Adjust Y for 10x scale to keep bottom on ground
-  mesh.scale.set(10, 10, 10); // Make boss 10x bigger
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
-  return mesh;
-}
-
-if (bossMesh === null) {
-  bossMesh = createBossMesh();
-  bossGroup.add(bossMesh);
-}
-scene.add(bossGroup);
-
-// Boss hitbox indicator (circle on ground)
-const bossHitboxIndicator = new THREE.Mesh(
-  new THREE.RingGeometry(BOSS_HITBOX_RADIUS * 0.95, BOSS_HITBOX_RADIUS, 32),
-  new THREE.MeshBasicMaterial({
-    color: 0xff0000,
-    transparent: true,
-    opacity: 0.3,
-    side: THREE.DoubleSide,
-    depthWrite: false,
-  })
-);
-bossHitboxIndicator.position.copy(BOSS_POSITION);
-bossHitboxIndicator.position.y = 0.05;
-bossHitboxIndicator.rotation.x = -Math.PI / 2;
-scene.add(bossHitboxIndicator);
-
-// Boss health bar
-const bossHealthBarEl = createEnemyHealthBar();
-bossHealthBarEl.fill.style.background = 'linear-gradient(90deg,#8b0000,#c03030)';
-enemyHealthBarsContainer.appendChild(bossHealthBarEl.wrap);
-
-/** Returns true if the boss died. */
-function damageBoss(amount: number): boolean {
-  createHitMarker(BOSS_POSITION, amount);
-  bossHealth = Math.max(0, bossHealth - amount);
-  if (bossHealth <= 0) {
-    addXp(200); // Boss gives lots of XP
-    trySpawnDrop(BOSS_POSITION.clone(), 'resurrector'); // Use resurrector drop table for now
-    bossGroup.remove(bossMesh!);
-    bossAlive = false;
-    return true;
-  }
-  return false;
-}
-
-// Boss fireball with ground indicators
-interface BossFireball {
-  mesh: THREE.Mesh;
-  velocity: THREE.Vector3;
-  ttl: number;
-  targetPosition: THREE.Vector3;
-  warningTime: number; // Time when indicator appeared
-  indicatorOuter: THREE.Mesh; // Outer ring (static size)
-  indicatorInner: THREE.Mesh; // Inner ring (expands)
-}
-
-const bossFireballs: BossFireball[] = [];
-const bossFireballIndicatorGroup = new THREE.Group();
-scene.add(bossFireballIndicatorGroup);
-
-function createBossFireballMesh(): THREE.Mesh {
-  const geometry = new THREE.SphereGeometry(BOSS_FIREBALL_RADIUS, 12, 10);
-  const material = new THREE.MeshStandardMaterial({
-    color: 0xff4400,
-    emissive: 0xff2200,
-    emissiveIntensity: 0.7,
-    roughness: 0.3,
-    metalness: 0.1,
-  });
-  const mesh = new THREE.Mesh(geometry, material);
-  mesh.castShadow = true;
-  return mesh;
-}
-
-function createBossFireballIndicator(targetPos: THREE.Vector3): { outer: THREE.Mesh; inner: THREE.Mesh } {
-  // Outer ring: static size showing explosion radius
-  const outerGeometry = new THREE.RingGeometry(
-    BOSS_FIREBALL_EXPLOSION_RADIUS * 0.9,
-    BOSS_FIREBALL_EXPLOSION_RADIUS,
-    32
-  );
-  const outerMaterial = new THREE.MeshBasicMaterial({
-    color: 0xff4400,
-    transparent: true,
-    opacity: 0.6,
-    side: THREE.DoubleSide,
-    depthWrite: false,
-  });
-  const outerMesh = new THREE.Mesh(outerGeometry, outerMaterial);
-  outerMesh.position.copy(targetPos);
-  outerMesh.position.y = 0.1;
-  outerMesh.rotation.x = -Math.PI / 2;
-  
-  // Inner ring: starts small, expands to outer ring
-  const innerGeometry = new THREE.RingGeometry(0.1, 0.3, 24);
-  const innerMaterial = new THREE.MeshBasicMaterial({
-    color: 0xffaa00,
-    transparent: true,
-    opacity: 0.8,
-    side: THREE.DoubleSide,
-    depthWrite: false,
-  });
-  const innerMesh = new THREE.Mesh(innerGeometry, innerMaterial);
-  innerMesh.position.copy(targetPos);
-  innerMesh.position.y = 0.11; // Slightly above outer ring
-  innerMesh.rotation.x = -Math.PI / 2;
-  
-  bossFireballIndicatorGroup.add(outerMesh);
-  bossFireballIndicatorGroup.add(innerMesh);
-  
-  return { outer: outerMesh, inner: innerMesh };
-}
+let playerPoisoned = false;
+let playerPoisonStartTime = -999;
+let lastPoisonTickTime = -999;
+const playerPoisonVisuals = createPlayerPoisonVisuals(scene, () => ({
+  playerPoisoned,
+  playerPoisonStartTime,
+  poisonDuration: POISON_DURATION,
+  character,
+}));
 
 interface EnemyFireball {
   mesh: THREE.Mesh;
@@ -1189,6 +1003,15 @@ function createEnemyFireballMesh(): THREE.Mesh {
   return mesh;
 }
 
+const groundItemsApi = createGroundItems({
+  scene,
+  getCamera: () => isoCamera.three,
+  container,
+  canvas,
+  tryAddToInventory: (itemId) => inventory.addItem(itemId),
+  canInteract: () => !isDead && !isPaused,
+});
+
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
 const TERRAIN_XZ_MIN = 0;
@@ -1199,7 +1022,7 @@ const MOVE_ARRIVAL_DIST = 0.05;
 let moveTarget: THREE.Vector3 | null = null;
 
 // Auto-attack target tracking
-type AttackTargetType = 'enemy' | 'caster' | 'resurrector' | 'boss';
+type AttackTargetType = 'enemy' | 'caster' | 'resurrector' | 'teleporter' | 'boss';
 interface AttackTarget {
   type: AttackTargetType;
   index: number;
@@ -1211,7 +1034,9 @@ function setMoveTargetFromMouse(clientX: number, clientY: number): void {
   pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
   pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
   raycaster.setFromCamera(pointer, isoCamera.three);
-  
+
+  if (groundItemsApi.tryPickupFromRaycast(raycaster)) return;
+
   // Get the ground intersection point
   const hits = raycaster.intersectObject(terrain);
   if (hits.length === 0) return;
@@ -1251,11 +1076,22 @@ function setMoveTargetFromMouse(clientX: number, clientY: number): void {
       return;
     }
   }
+
+  // Check teleporters
+  for (let t = 0; t < teleportersApi.getCount(); t++) {
+    if (!teleportersApi.isAlive(t)) continue;
+    const dist = groundPoint.distanceTo(teleportersApi.getPosition(t));
+    if (dist <= clickRadius) {
+      attackTarget = { type: 'teleporter', index: t };
+      moveTarget = null;
+      return;
+    }
+  }
   
   // Check boss (use circular hitbox radius for click detection)
-  if (bossAlive) {
-    const dist = groundPoint.distanceTo(BOSS_POSITION);
-    if (dist <= BOSS_HITBOX_RADIUS) {
+  if (bossApi.isAlive()) {
+    const dist = groundPoint.distanceTo(bossApi.getPosition());
+    if (dist <= bossApi.getHitboxRadius()) {
       attackTarget = { type: 'boss', index: 0 };
       moveTarget = null;
       return;
@@ -1353,11 +1189,25 @@ function updatePlayerCollisions(dt: number): void {
     }
   }
   
+  // Collision with teleporters
+  for (let t = 0; t < teleportersApi.getCount(); t++) {
+    if (!teleportersApi.isAlive(t)) continue;
+    const telePos = teleportersApi.getPosition(t);
+    const toTele = new THREE.Vector3().subVectors(charPos, telePos);
+    const dist = toTele.length();
+    const minDist = PLAYER_COLLISION_RADIUS + TELEPORTER_SIZE / 2;
+    if (dist < minDist && dist > 0.001) {
+      const overlap = minDist - dist;
+      toTele.normalize();
+      collisionPushVec.addScaledVector(toTele, overlap);
+    }
+  }
+
   // Collision with boss (circular hitbox)
-  if (bossAlive) {
-    const toBoss = new THREE.Vector3().subVectors(charPos, BOSS_POSITION);
+  if (bossApi.isAlive()) {
+    const toBoss = new THREE.Vector3().subVectors(charPos, bossApi.getPosition());
     const dist = toBoss.length();
-    const minDist = PLAYER_COLLISION_RADIUS + BOSS_HITBOX_RADIUS;
+    const minDist = PLAYER_COLLISION_RADIUS + bossApi.getHitboxRadius();
     if (dist < minDist && dist > 0.001) {
       const overlap = minDist - dist;
       toBoss.normalize();
@@ -1369,60 +1219,6 @@ function updatePlayerCollisions(dt: number): void {
   if (collisionPushVec.lengthSq() > 0.0001) {
     character.position.addScaledVector(collisionPushVec, COLLISION_PUSH_STRENGTH * dt);
     character.position.y = 0;
-  }
-}
-
-function updateEquippedSword(gameTime: number): void {
-  const swingAge = gameTime - swordSwingStartTime;
-  const isSwinging = swingAge >= 0 && swingAge < SWORD_SWING_DURATION;
-  
-  if (isSwinging) {
-    // Animate swing: arc motion from side to front
-    const t = swingAge / SWORD_SWING_DURATION;
-    // Ease out for snappy swing
-    const easeT = 1 - Math.pow(1 - t, 3);
-    
-    // Arc motion: swing from right side forward and up, then down
-    const arcAngle = easeT * Math.PI; // 180 degree arc
-    const arcRadius = 0.6;
-    const forwardDist = Math.sin(arcAngle) * arcRadius;
-    const upDist = Math.sin(arcAngle * 0.5) * 0.2; // Peak at middle of swing
-    const sideDist = (1 - Math.cos(arcAngle)) * arcRadius * 0.3;
-    
-    equippedSword.position.x = SWORD_IDLE_POSITION.x - sideDist;
-    equippedSword.position.y = SWORD_IDLE_POSITION.y + upDist;
-    equippedSword.position.z = SWORD_IDLE_POSITION.z + forwardDist;
-    
-    // Rotate sword to follow the arc (point forward during swing)
-    equippedSword.rotation.x = SWORD_IDLE_ROTATION.x + arcAngle * 0.4;
-    equippedSword.rotation.y = SWORD_IDLE_ROTATION.y - arcAngle * 0.6;
-    equippedSword.rotation.z = SWORD_IDLE_ROTATION.z + arcAngle * 0.3;
-  } else {
-    // Return to idle position smoothly
-    const returnT = Math.min(1, (swingAge - SWORD_SWING_DURATION) / 0.15);
-    const easeReturn = 1 - Math.pow(1 - returnT, 2); // Ease out
-    
-    // Interpolate from swing end position to idle
-    const swingEndX = SWORD_IDLE_POSITION.x - 0.18;
-    const swingEndY = SWORD_IDLE_POSITION.y + 0.1;
-    const swingEndZ = SWORD_IDLE_POSITION.z + 0.6;
-    const swingEndRotX = SWORD_IDLE_ROTATION.x + Math.PI * 0.4;
-    const swingEndRotY = SWORD_IDLE_ROTATION.y - Math.PI * 0.6;
-    const swingEndRotZ = SWORD_IDLE_ROTATION.z + Math.PI * 0.3;
-    
-    equippedSword.position.x = swingEndX + (SWORD_IDLE_POSITION.x - swingEndX) * easeReturn;
-    equippedSword.position.y = swingEndY + (SWORD_IDLE_POSITION.y - swingEndY) * easeReturn;
-    equippedSword.position.z = swingEndZ + (SWORD_IDLE_POSITION.z - swingEndZ) * easeReturn;
-    
-    equippedSword.rotation.x = swingEndRotX + (SWORD_IDLE_ROTATION.x - swingEndRotX) * easeReturn;
-    equippedSword.rotation.y = swingEndRotY + (SWORD_IDLE_ROTATION.y - swingEndRotY) * easeReturn;
-    equippedSword.rotation.z = swingEndRotZ + (SWORD_IDLE_ROTATION.z - swingEndRotZ) * easeReturn;
-    
-    // Snap to idle if close enough
-    if (returnT >= 1) {
-      equippedSword.position.set(SWORD_IDLE_POSITION.x, SWORD_IDLE_POSITION.y, SWORD_IDLE_POSITION.z);
-      equippedSword.rotation.set(SWORD_IDLE_ROTATION.x, SWORD_IDLE_ROTATION.y, SWORD_IDLE_ROTATION.z);
-    }
   }
 }
 
@@ -1454,13 +1250,20 @@ function updateAutoAttack(dt: number, gameTime: number): void {
     }
     targetPos = resurrectorMeshes[attackTarget.index].position;
     isAlive = resurrectorAlive[attackTarget.index];
-  } else if (attackTarget.type === 'boss') {
-    if (!bossAlive) {
+  } else if (attackTarget.type === 'teleporter') {
+    if (attackTarget.index >= teleportersApi.getCount() || !teleportersApi.isAlive(attackTarget.index)) {
       attackTarget = null;
       return;
     }
-    targetPos = BOSS_POSITION;
-    isAlive = bossAlive;
+    targetPos = teleportersApi.getPosition(attackTarget.index);
+    isAlive = teleportersApi.isAlive(attackTarget.index);
+  } else if (attackTarget.type === 'boss') {
+    if (!bossApi.isAlive()) {
+      attackTarget = null;
+      return;
+    }
+    targetPos = bossApi.getPosition();
+    isAlive = bossApi.isAlive();
   }
   
   if (!isAlive || !targetPos) {
@@ -1477,13 +1280,15 @@ function updateAutoAttack(dt: number, gameTime: number): void {
   let effectiveMeleeRange = MELEE_RANGE;
   if (attackTarget.type === 'boss') {
     // For boss, melee range is measured from the boss's circular hitbox edge
-    effectiveMeleeRange = BOSS_HITBOX_RADIUS + MELEE_RANGE;
+    effectiveMeleeRange = bossApi.getHitboxRadius() + MELEE_RANGE;
   } else if (attackTarget.type === 'enemy') {
     effectiveMeleeRange = ENEMY_COLLISION_RADIUS + MELEE_RANGE;
   } else if (attackTarget.type === 'caster') {
     effectiveMeleeRange = CASTER_COLLISION_RADIUS + MELEE_RANGE;
   } else if (attackTarget.type === 'resurrector') {
     effectiveMeleeRange = RESURRECTOR_COLLISION_RADIUS + MELEE_RANGE;
+  } else if (attackTarget.type === 'teleporter') {
+    effectiveMeleeRange = TELEPORTER_SIZE / 2 + MELEE_RANGE;
   }
   
   // If in melee range, attack
@@ -1500,59 +1305,68 @@ function updateAutoAttack(dt: number, gameTime: number): void {
       attackTarget = null;
     } else if (attackTarget.type === 'resurrector' && !resurrectorAlive[attackTarget.index]) {
       attackTarget = null;
-    } else if (attackTarget.type === 'boss' && !bossAlive) {
+    } else if (attackTarget.type === 'teleporter' && !teleportersApi.isAlive(attackTarget.index)) {
+      attackTarget = null;
+    } else if (attackTarget.type === 'boss' && !bossApi.isAlive()) {
       attackTarget = null;
     }
   } else {
-    // Path to target, but stop at melee range from target's edge
-    if (moveTarget === null) moveTarget = new THREE.Vector3();
-    // Calculate position at melee range from target
-    const dirToTarget = new THREE.Vector3(dx, 0, dz).normalize();
-    const stopDistance = effectiveMeleeRange - 0.1; // Stop slightly before to avoid overshooting
-    moveTarget.set(
-      targetPos.x - dirToTarget.x * stopDistance,
-      0,
-      targetPos.z - dirToTarget.z * stopDistance
-    );
+    // Bow: if in bow range, request arrow shot and stop moving
+    const hasBow = equipment.getWeapon() === 'bow';
+    if (hasBow && dist <= BOW_RANGE && gameTime - lastBowAttackTime >= BOW_COOLDOWN) {
+      pendingBowShotTarget = targetPos.clone();
+      lastBowAttackTime = gameTime;
+      moveTarget = null;
+      return;
+    }
+    // Only run toward the enemy when outside range. If we're already too close (dist <= stopDistance),
+    // the computed position would be behind us and the character would run away — so don't set moveTarget.
+    const stopDistance = hasBow
+      ? BOW_RANGE - 0.1
+      : effectiveMeleeRange - 0.1;
+    if (dist > stopDistance && moveTarget === null) {
+      moveTarget = new THREE.Vector3();
+      const dirToTarget = new THREE.Vector3(dx, 0, dz).normalize();
+      moveTarget.set(
+        targetPos.x - dirToTarget.x * stopDistance,
+        0,
+        targetPos.z - dirToTarget.z * stopDistance
+      );
+    }
   }
+}
+
+/** Returns current world position of attack target, or null if none/invalid. */
+function getTargetPosition(): THREE.Vector3 | null {
+  if (attackTarget === null) return null;
+  if (attackTarget.type === 'enemy') {
+    if (attackTarget.index >= ENEMY_COUNT || !enemyAlive[attackTarget.index]) return null;
+    return enemyPositions[attackTarget.index];
+  }
+  if (attackTarget.type === 'caster') {
+    if (attackTarget.index >= CASTER_COUNT || !casterAlive[attackTarget.index]) return null;
+    return casterMeshes[attackTarget.index].position.clone();
+  }
+  if (attackTarget.type === 'resurrector') {
+    if (attackTarget.index >= RESURRECTOR_COUNT || !resurrectorAlive[attackTarget.index]) return null;
+    return resurrectorMeshes[attackTarget.index].position.clone();
+  }
+  if (attackTarget.type === 'teleporter') {
+    if (attackTarget.index >= teleportersApi.getCount() || !teleportersApi.isAlive(attackTarget.index)) return null;
+    return teleportersApi.getPosition(attackTarget.index).clone();
+  }
+  if (attackTarget.type === 'boss') {
+    if (!bossApi.isAlive()) return null;
+    return bossApi.getPosition().clone();
+  }
+  return null;
 }
 
 // Projectile ballistics (parabolic arc, land at cursor)
-const PROJECTILE_GRAVITY = 22;
 const LAUNCH_HEIGHT = 0.5;
 const MAX_PROJECTILE_RANGE = 28;
 
-/** Returns initial velocity so a projectile launched from origin (at launchHeight) lands at target (y=0), clamped to maxRange. */
-function getLandingVelocity(
-  origin: THREE.Vector3,
-  target: THREE.Vector3,
-  horizontalSpeed: number,
-  gravity: number,
-  maxRange: number,
-  outVel: THREE.Vector3
-): void {
-  let dx = target.x - origin.x;
-  let dz = target.z - origin.z;
-  let d = Math.sqrt(dx * dx + dz * dz);
-  if (d > maxRange) {
-    d = maxRange;
-    const scale = d / Math.sqrt(dx * dx + dz * dz);
-    dx *= scale;
-    dz *= scale;
-  }
-  if (d < 0.1) {
-    outVel.set(horizontalSpeed, 0, 0);
-    return;
-  }
-  outVel.x = (dx / d) * horizontalSpeed;
-  outVel.z = (dz / d) * horizontalSpeed;
-  const t = d / horizontalSpeed;
-  let vy = 0.5 * gravity * t - LAUNCH_HEIGHT / t;
-  if (vy < 0) vy = 0;
-  outVel.y = vy;
-}
-
-// Fireballs: right-click shoots toward cursor
+// Fireballs: right-click shoots toward cursor (see combat/Projectiles)
 const FIREBALL_SPEED = 18;
 const FIREBALL_RADIUS = 0.35;
 const FIREBALL_TTL = 2;
@@ -1579,85 +1393,8 @@ let lastMeleeTime = -999;
 function performMeleeAttack(gameTime: number, targetDirection?: THREE.Vector3): void {
   if (gameTime - lastMeleeTime < MELEE_COOLDOWN) return;
   lastMeleeTime = gameTime;
-  
-  const charPos = character.position;
-  
-  // Determine attack direction
-  let attackDir: THREE.Vector3;
-  if (targetDirection) {
-    attackDir = targetDirection.clone().normalize();
-    // Rotate character to face the target
-    character.rotation.y = Math.atan2(attackDir.x, attackDir.z);
-  } else {
-    // If no target direction provided (e.g., spacebar), use character's current facing
-    attackDir = new THREE.Vector3(
-      Math.sin(character.rotation.y),
-      0,
-      Math.cos(character.rotation.y)
-    );
-  }
-  
-  // Start sword swing animation
-  swordSwingStartTime = gameTime;
-  
-  // Check enemies - only hit those in front (range = enemy radius + melee)
-  for (let j = 0; j < ENEMY_COUNT; j++) {
-    if (!enemyAlive[j]) continue;
-    const toEnemy = new THREE.Vector3().subVectors(enemyPositions[j], charPos);
-    const dist = toEnemy.length();
-    if (dist <= ENEMY_COLLISION_RADIUS + MELEE_RANGE && dist > 0.01) {
-      toEnemy.normalize();
-      const dot = attackDir.dot(toEnemy);
-      const angle = Math.acos(Math.max(-1, Math.min(1, dot)));
-      if (angle <= MELEE_ARC / 2) {
-        damageRedCube(j, getMeleeDamage());
-      }
-    }
-  }
-  
-  // Check casters - only hit those in front (range = caster radius + melee)
-  for (let c = 0; c < CASTER_COUNT; c++) {
-    if (!casterAlive[c]) continue;
-    const toCaster = new THREE.Vector3().subVectors(casterMeshes[c].position, charPos);
-    const dist = toCaster.length();
-    if (dist <= CASTER_COLLISION_RADIUS + MELEE_RANGE && dist > 0.01) {
-      toCaster.normalize();
-      const dot = attackDir.dot(toCaster);
-      const angle = Math.acos(Math.max(-1, Math.min(1, dot)));
-      if (angle <= MELEE_ARC / 2) {
-        damageCaster(c, getMeleeDamage());
-      }
-    }
-  }
-  
-  // Check resurrectors - only hit those in front (range = resurrector radius + melee)
-  for (let r = 0; r < RESURRECTOR_COUNT; r++) {
-    if (!resurrectorAlive[r]) continue;
-    const toResurrector = new THREE.Vector3().subVectors(resurrectorMeshes[r].position, charPos);
-    const dist = toResurrector.length();
-    if (dist <= RESURRECTOR_COLLISION_RADIUS + MELEE_RANGE && dist > 0.01) {
-      toResurrector.normalize();
-      const dot = attackDir.dot(toResurrector);
-      const angle = Math.acos(Math.max(-1, Math.min(1, dot)));
-      if (angle <= MELEE_ARC / 2) {
-        damageResurrector(r, getMeleeDamage());
-      }
-    }
-  }
-  
-  // Check boss - only hit if in front and within melee range of hitbox
-  if (bossAlive) {
-    const toBoss = new THREE.Vector3().subVectors(BOSS_POSITION, charPos);
-    const dist = toBoss.length();
-    if (dist <= BOSS_HITBOX_RADIUS + MELEE_RANGE && dist > 0.01) {
-      toBoss.normalize();
-      const dot = attackDir.dot(toBoss);
-      const angle = Math.acos(Math.max(-1, Math.min(1, dot)));
-      if (angle <= MELEE_ARC / 2) {
-        damageBoss(getMeleeDamage());
-      }
-    }
-  }
+  const state = buildCombatState();
+  swordApi.performMeleeAttack(gameTime, targetDirection ?? null, state);
 }
 function getMagicDamage(): number {
   return Math.round(BASE_FIREBALL_DAMAGE * (intelligence / 10));
@@ -1670,13 +1407,19 @@ function getRangedDamage(): number {
   return dmg;
 }
 
-/** Ranged weapon type: thrown = rock (infinite ammo, slow rate); future: bow, gun, etc. */
+/** Ranged weapon type: thrown = rock (infinite ammo, slow rate); bow = targeted shot. */
 type RangedWeaponId = 'rock';
 const RANGED_ROCK_COOLDOWN = 1.2; // slow attack rate for thrown rock
 let lastRangedAttackTime = -999;
 function getRockCooldown(): number {
   return isAugmentUnlocked('rock_quickdraw' as AugmentId) ? RANGED_ROCK_COOLDOWN * 0.7 : RANGED_ROCK_COOLDOWN;
 }
+
+// Bow: shoots at attack target when in range (equipped weapon)
+const BOW_RANGE = 18;
+const BOW_COOLDOWN = 0.85;
+let lastBowAttackTime = -999;
+let pendingBowShotTarget: THREE.Vector3 | null = null;
 
 /** Returns true if the enemy died. */
 function damageRedCube(j: number, amount: number): boolean {
@@ -1820,7 +1563,7 @@ const waveSpawnOut = { x: 0, y: 0, z: 0 };
 
 const waves = createWaves({
   onStartWave(wave, composition, getSpawnPosition) {
-    const { grunts, casters, resurrectors } = composition;
+    const { grunts, casters, resurrectors, teleporters } = composition;
     attackTarget = null;
     moveTarget = null;
 
@@ -1833,20 +1576,11 @@ const waves = createWaves({
       resurrectorGroup.remove(resurrectorMeshes[r]);
       resurrectorAlive[r] = false;
     }
+    teleportersApi.clear();
 
     if (wave >= 1) {
-      if (bossMesh === null) {
-        bossMesh = createBossMesh();
-      }
-      if (!bossGroup.children.includes(bossMesh)) {
-        bossGroup.add(bossMesh);
-      }
-      if (!bossAlive) {
-        bossAlive = true;
-        bossHealth = MAX_BOSS_HEALTH;
-        lastBossFireballTime = -999;
-        addChatMessage('Boss has appeared!');
-      }
+      bossApi.spawn();
+      addChatMessage('Boss has appeared!');
     }
 
     for (let j = 0; j < grunts; j++) {
@@ -1857,7 +1591,6 @@ const waves = createWaves({
       enemyHealth[j] = MAX_ENEMY_HEALTH;
       enemyPositions[j].copy(tempSpawnPos);
       lastEnemyDamageTime[j] = -999;
-      lastSwordHitByEnemy[j] = -999;
       enemyExplosionState[j] = 'moving';
       enemyExplosionChargeStart[j] = -999;
       enemyExplosionLastTime[j] = -999;
@@ -1884,24 +1617,88 @@ const waves = createWaves({
       lastResurrectorResurrectTime[r] = -999;
     }
 
+    teleportersApi.spawn(teleporters, (t) => {
+      getSpawnPosition(300 + t, waveSpawnOut);
+      return new THREE.Vector3(waveSpawnOut.x, TELEPORTER_SIZE / 2, waveSpawnOut.z);
+    });
+
     for (let j = 0; j < ENEMY_COUNT; j++) {
       const enemy = enemies.children[j] as THREE.Object3D;
       if (enemy) {
         enemy.position.set(enemyPositions[j].x, ENEMY_SIZE / 2, enemyPositions[j].z);
       }
     }
-    waveEl.textContent = String(wave);
+    // Wave display updated by HUD each frame
   },
 });
+
+// Combat state snapshot for Sword and Projectiles (built each frame)
+function buildCombatState(): CombatState {
+  return {
+    enemyPositions,
+    enemyAlive,
+    casterPositions: casterMeshes.map((m) => m.position),
+    casterAlive,
+    resurrectorPositions: resurrectorMeshes.map((m) => m.position),
+    resurrectorAlive,
+    teleporterPositions: teleportersApi.getPositions(),
+    teleporterAlive: teleportersApi.getAlive(),
+    bossPosition: bossApi.getPosition(),
+    bossAlive: bossApi.isAlive(),
+    enemySize: ENEMY_SIZE,
+    casterSize: CASTER_SIZE,
+    resurrectorSize: RESURRECTOR_SIZE,
+    teleporterSize: TELEPORTER_SIZE,
+    bossHitboxRadius: bossApi.getHitboxRadius(),
+  };
+}
+
+const combatCallbacks = {
+  damageEnemy: damageRedCube,
+  damageCaster,
+  damageResurrector,
+  damageTeleporter: (t: number, amount: number) => teleportersApi.damage(t, amount),
+  damageBoss: (amount: number) => bossApi.damage(amount),
+};
+
+const swordApi = createSword(scene, character, {
+  getEquippedWeapon: () => equipment.getWeapon(),
+  getMeleeDamage,
+  getOrbitRadius: getSwordOrbitRadius,
+  getHitRadius: getSwordHitRadius,
+  getHitCooldown: getSwordHitCooldown,
+  hasOrbitSword: () => isSkillUnlocked('sword'),
+  hasTwinBlades: () => isAugmentUnlocked('sword_twin' as AugmentId),
+  enemyCount: ENEMY_COUNT,
+  casterCount: CASTER_COUNT,
+  resurrectorCount: RESURRECTOR_COUNT,
+}, combatCallbacks);
+
+const EXPLOSION_HIT_RADIUS_BASE = CONST_FIREBALL_RADIUS * CONST_EXPLOSION_MAX_SCALE;
+const EXPLOSION_HIT_RADIUS_INFERNO = EXPLOSION_HIT_RADIUS_BASE * 1.5;
+function getExplosionHitRadius(): number {
+  return isAugmentUnlocked('fireball_radius' as AugmentId) ? EXPLOSION_HIT_RADIUS_INFERNO : EXPLOSION_HIT_RADIUS_BASE;
+}
+
+const fireballsApi = createFireballs(scene, {
+  getMagicDamage,
+  hasExplosionAugment: () => isAugmentUnlocked('fireball_explosion' as AugmentId),
+  getExplosionHitRadius,
+}, combatCallbacks);
+
+const rocksApi = createRocks(scene, { getRangedDamage }, combatCallbacks);
+const arrowsApi = createArrows(scene, { getRangedDamage }, combatCallbacks);
 
 function isAnyEnemyAlive(): boolean {
   const grunts = waves.getLevelGruntsCount();
   const casters = waves.getLevelCastersCount();
   const resurrectors = waves.getLevelResurrectorsCount();
+  const teleporters = waves.getLevelTeleportersCount();
   for (let j = 0; j < grunts; j++) if (enemyAlive[j]) return true;
   for (let c = 0; c < casters; c++) if (casterAlive[c]) return true;
   for (let r = 0; r < resurrectors; r++) if (resurrectorAlive[r]) return true;
-  if (bossAlive) return true;
+  for (let t = 0; t < teleporters; t++) if (teleportersApi.isAlive(t)) return true;
+  if (bossApi.isAlive()) return true;
   return false;
 }
 
@@ -1947,7 +1744,12 @@ const pickups: Pickup[] = [];
 
 function trySpawnDrop(position: THREE.Vector3, monsterType: MonsterType): void {
   const drop = rollDrop(monsterType);
-  if (drop) createPickup(position, drop);
+  if (!drop) return;
+  if (drop === 'coin') {
+    groundItemsApi.spawn(position.clone(), 'coin');
+    return;
+  }
+  createPickup(position, drop);
 }
 
 function createPickup(position: THREE.Vector3, type: NonNullable<DropType>): void {
@@ -1985,39 +1787,38 @@ function updatePickups(dt: number): void {
   }
 }
 
-const EXPLOSION_DURATION = 0.25;
-const EXPLOSION_MAX_SCALE = 7;
-const EXPLOSION_HIT_RADIUS_BASE = FIREBALL_RADIUS * EXPLOSION_MAX_SCALE;
-const EXPLOSION_HIT_RADIUS_INFERNO = EXPLOSION_HIT_RADIUS_BASE * 1.5; // with Inferno augment
-function getExplosionHitRadius(): number {
-  return isAugmentUnlocked('fireball_radius' as AugmentId) ? EXPLOSION_HIT_RADIUS_INFERNO : EXPLOSION_HIT_RADIUS_BASE;
-}
+bossApi = createBoss(scene, {
+  getPlayerPosition: () => character.position,
+  applyDamageToPlayer: (amount, damageType) => {
+    if (!isDamageBlocked(damageType)) setHealth(health - amount);
+  },
+  setPlayerBurning: () => {
+    playerBurning = true;
+    playerBurnStartTime = gameTime;
+    lastBurnTickTime = gameTime;
+  },
+  onCreateHitMarker: createHitMarker,
+  onDeath: (position) => {
+    addXp(XP_BOSS);
+    trySpawnDrop(position, 'resurrector');
+  },
+  addExplosionEffect: (position) => {
+    enemyAttackHitEffects.push(createEnemyAttackHitEffect(position));
+  },
+});
 
-interface Fireball {
-  mesh: THREE.Mesh;
-  velocity: THREE.Vector3;
-  ttl: number;
-  state: 'flying' | 'exploding';
-  explosionElapsed: number;
-}
+teleportersApi = createTeleporters(scene, {
+  onCreateHitMarker: createHitMarker,
+  onDeath: (_index, position) => {
+    addXp(XP_TELEPORTER);
+    trySpawnDrop(position, 'teleporter');
+  },
+  addIncomingPoisonPool: (position, gameTime) => {
+    poisonPoolsApi.addIncomingPool(position, gameTime);
+  },
+});
 
-const fireballs: Fireball[] = [];
-
-function createFireballMesh(): THREE.Mesh {
-  const geometry = new THREE.SphereGeometry(FIREBALL_RADIUS, 12, 10);
-  const material = new THREE.MeshStandardMaterial({
-    color: 0xff6600,
-    emissive: 0xff3300,
-    emissiveIntensity: 0.6,
-    roughness: 0.3,
-    metalness: 0.1,
-    transparent: true,
-  });
-  const mesh = new THREE.Mesh(geometry, material);
-  mesh.castShadow = true;
-  return mesh;
-}
-
+// Fireball: right-click spawns via combat/Projectiles
 clickOverlay.addEventListener('contextmenu', (e) => {
   if (isDead || isPaused || !isSkillUnlocked('fireball') || mana < FIREBALL_MANA_COST) return;
   const rect = canvas.getBoundingClientRect();
@@ -2029,221 +1830,11 @@ clickOverlay.addEventListener('contextmenu', (e) => {
     setMana(mana - FIREBALL_MANA_COST);
     const target = hits[0].point.clone();
     target.y = 0;
-    const mesh = createFireballMesh();
-    mesh.position.copy(character.position);
-    mesh.position.y = LAUNCH_HEIGHT;
-    scene.add(mesh);
-    const vel = new THREE.Vector3();
-    getLandingVelocity(character.position, target, FIREBALL_SPEED, PROJECTILE_GRAVITY, MAX_PROJECTILE_RANGE, vel);
-    fireballs.push({
-      mesh,
-      velocity: vel,
-      ttl: FIREBALL_TTL,
-      state: 'flying',
-      explosionElapsed: 0,
-    });
+    fireballsApi.spawn(character.position, target);
   }
 });
 
-function updateFireballs(dt: number): void {
-  const hitRadius = ENEMY_SIZE / 2 + FIREBALL_RADIUS;
-  for (let i = fireballs.length - 1; i >= 0; i--) {
-    const fb = fireballs[i];
-
-    if (fb.state === 'exploding') {
-      fb.explosionElapsed += dt;
-      const t = Math.min(1, fb.explosionElapsed / EXPLOSION_DURATION);
-      const scale = 1 + (EXPLOSION_MAX_SCALE - 1) * t;
-      fb.mesh.scale.setScalar(scale);
-      const mat = fb.mesh.material as THREE.MeshStandardMaterial;
-      mat.opacity = 1 - t;
-      if (fb.explosionElapsed >= EXPLOSION_DURATION) {
-        scene.remove(fb.mesh);
-        (fb.mesh.geometry as THREE.BufferGeometry).dispose();
-        mat.dispose();
-        fireballs.splice(i, 1);
-      }
-      continue;
-    }
-
-    fb.velocity.y -= PROJECTILE_GRAVITY * dt;
-    fb.mesh.position.addScaledVector(fb.velocity, dt);
-    fb.ttl -= dt;
-    if (fb.mesh.position.y < 0) {
-      fb.mesh.position.y = 0;
-      if (isAugmentUnlocked('fireball_explosion')) {
-        fb.state = 'exploding';
-        fb.velocity.set(0, 0, 0);
-        fb.explosionElapsed = 0;
-        const r = getExplosionHitRadius();
-        for (let k = 0; k < ENEMY_COUNT; k++) {
-          if (!enemyAlive[k]) continue;
-          if (fb.mesh.position.distanceTo(enemyPositions[k]) <= r) damageRedCube(k, getMagicDamage());
-        }
-        for (let c = 0; c < CASTER_COUNT; c++) {
-          if (!casterAlive[c]) continue;
-          if (fb.mesh.position.distanceTo(casterMeshes[c].position) <= r) damageCaster(c, getMagicDamage());
-        }
-        for (let r = 0; r < RESURRECTOR_COUNT; r++) {
-          if (!resurrectorAlive[r]) continue;
-          if (fb.mesh.position.distanceTo(resurrectorMeshes[r].position) <= r) damageResurrector(r, getMagicDamage());
-        }
-        if (bossAlive && fb.mesh.position.distanceTo(BOSS_POSITION) <= r) damageBoss(getMagicDamage());
-      } else {
-        scene.remove(fb.mesh);
-        (fb.mesh.geometry as THREE.BufferGeometry).dispose();
-        (fb.mesh.material as THREE.Material).dispose();
-        fireballs.splice(i, 1);
-      }
-      continue;
-    }
-    if (fb.ttl <= 0) {
-      scene.remove(fb.mesh);
-      (fb.mesh.geometry as THREE.BufferGeometry).dispose();
-      (fb.mesh.material as THREE.Material).dispose();
-      fireballs.splice(i, 1);
-      continue;
-    }
-    for (let j = 0; j < ENEMY_COUNT; j++) {
-      if (!enemyAlive[j]) continue;
-      if (fb.mesh.position.distanceTo(enemyPositions[j]) < hitRadius) {
-        if (isAugmentUnlocked('fireball_explosion')) {
-          fb.state = 'exploding';
-          fb.velocity.set(0, 0, 0);
-          fb.explosionElapsed = 0;
-          fb.mesh.position.copy(enemyPositions[j]);
-          const r = getExplosionHitRadius();
-          for (let k = 0; k < ENEMY_COUNT; k++) {
-            if (!enemyAlive[k]) continue;
-            if (fb.mesh.position.distanceTo(enemyPositions[k]) <= r) damageRedCube(k, getMagicDamage());
-          }
-          for (let c = 0; c < CASTER_COUNT; c++) {
-            if (!casterAlive[c]) continue;
-            if (fb.mesh.position.distanceTo(casterMeshes[c].position) <= r) damageCaster(c, getMagicDamage());
-          }
-          if (bossAlive && fb.mesh.position.distanceTo(BOSS_POSITION) <= r) damageBoss(getMagicDamage());
-        } else {
-          damageRedCube(j, getMagicDamage());
-          scene.remove(fb.mesh);
-          (fb.mesh.geometry as THREE.BufferGeometry).dispose();
-          (fb.mesh.material as THREE.Material).dispose();
-          fireballs.splice(i, 1);
-        }
-        break;
-      }
-    }
-    for (let c = 0; c < CASTER_COUNT; c++) {
-      if (!casterAlive[c]) continue;
-      if (fb.mesh.position.distanceTo(casterMeshes[c].position) < CASTER_SIZE / 2 + FIREBALL_RADIUS) {
-        if (isAugmentUnlocked('fireball_explosion')) {
-          fb.state = 'exploding';
-          fb.velocity.set(0, 0, 0);
-          fb.explosionElapsed = 0;
-          fb.mesh.position.copy(casterMeshes[c].position);
-          const r = getExplosionHitRadius();
-          for (let k = 0; k < ENEMY_COUNT; k++) {
-            if (!enemyAlive[k]) continue;
-            if (fb.mesh.position.distanceTo(enemyPositions[k]) <= r) damageRedCube(k, getMagicDamage());
-          }
-          for (let c2 = 0; c2 < CASTER_COUNT; c2++) {
-            if (!casterAlive[c2]) continue;
-            if (fb.mesh.position.distanceTo(casterMeshes[c2].position) <= r) damageCaster(c2, getMagicDamage());
-          }
-          for (let r2 = 0; r2 < RESURRECTOR_COUNT; r2++) {
-            if (!resurrectorAlive[r2]) continue;
-            if (fb.mesh.position.distanceTo(resurrectorMeshes[r2].position) <= r) damageResurrector(r2, getMagicDamage());
-          }
-          if (bossAlive && fb.mesh.position.distanceTo(BOSS_POSITION) <= r) damageBoss(getMagicDamage());
-        } else {
-          damageCaster(c, getMagicDamage());
-          scene.remove(fb.mesh);
-          (fb.mesh.geometry as THREE.BufferGeometry).dispose();
-          (fb.mesh.material as THREE.Material).dispose();
-          fireballs.splice(i, 1);
-        }
-        break;
-      }
-    }
-    for (let r = 0; r < RESURRECTOR_COUNT; r++) {
-      if (!resurrectorAlive[r]) continue;
-      if (fb.mesh.position.distanceTo(resurrectorMeshes[r].position) < RESURRECTOR_SIZE / 2 + FIREBALL_RADIUS) {
-        if (isAugmentUnlocked('fireball_explosion')) {
-          fb.state = 'exploding';
-          fb.velocity.set(0, 0, 0);
-          fb.explosionElapsed = 0;
-          fb.mesh.position.copy(resurrectorMeshes[r].position);
-          const rHit = getExplosionHitRadius();
-          for (let k = 0; k < ENEMY_COUNT; k++) {
-            if (!enemyAlive[k]) continue;
-            if (fb.mesh.position.distanceTo(enemyPositions[k]) <= rHit) damageRedCube(k, getMagicDamage());
-          }
-          for (let c2 = 0; c2 < CASTER_COUNT; c2++) {
-            if (!casterAlive[c2]) continue;
-            if (fb.mesh.position.distanceTo(casterMeshes[c2].position) <= rHit) damageCaster(c2, getMagicDamage());
-          }
-          for (let r2 = 0; r2 < RESURRECTOR_COUNT; r2++) {
-            if (!resurrectorAlive[r2]) continue;
-            if (fb.mesh.position.distanceTo(resurrectorMeshes[r2].position) <= rHit) damageResurrector(r2, getMagicDamage());
-          }
-          if (bossAlive && fb.mesh.position.distanceTo(BOSS_POSITION) <= rHit) damageBoss(getMagicDamage());
-        } else {
-          damageResurrector(r, getMagicDamage());
-          scene.remove(fb.mesh);
-          (fb.mesh.geometry as THREE.BufferGeometry).dispose();
-          (fb.mesh.material as THREE.Material).dispose();
-          fireballs.splice(i, 1);
-        }
-        break;
-      }
-    }
-  }
-}
-
 // Throw skill: rock projectiles (Q key, toward cursor)
-const ROCK_SPEED = 14;
-const ROCK_RADIUS = 0.25;
-const ROCK_TTL = 1.8;
-
-interface Rock {
-  mesh: THREE.Mesh;
-  velocity: THREE.Vector3;
-  ttl: number;
-}
-
-const rocks: Rock[] = [];
-
-function createRockMesh(): THREE.Mesh {
-  const geometry = new THREE.DodecahedronGeometry(ROCK_RADIUS, 0);
-  const material = new THREE.MeshStandardMaterial({
-    color: 0x6a5a4a,
-    roughness: 0.9,
-    metalness: 0.05,
-  });
-  const mesh = new THREE.Mesh(geometry, material);
-  mesh.castShadow = true;
-  return mesh;
-}
-
-function spawnOneRock(origin: THREE.Vector3, target: THREE.Vector3, spreadAngleRad: number): void {
-  let aim = target.clone();
-  if (spreadAngleRad !== 0) {
-    const dir = new THREE.Vector3().subVectors(target, origin).setY(0);
-    if (dir.lengthSq() > 0.01) {
-      dir.normalize();
-      dir.applyAxisAngle(new THREE.Vector3(0, 1, 0), spreadAngleRad);
-      aim = origin.clone().add(dir.multiplyScalar(origin.distanceTo(target)));
-      aim.y = 0;
-    }
-  }
-  const mesh = createRockMesh();
-  mesh.position.copy(origin);
-  mesh.position.y = LAUNCH_HEIGHT;
-  scene.add(mesh);
-  const vel = new THREE.Vector3();
-  getLandingVelocity(origin, aim, ROCK_SPEED, PROJECTILE_GRAVITY, MAX_PROJECTILE_RANGE, vel);
-  rocks.push({ mesh, velocity: vel, ttl: ROCK_TTL });
-}
-
 function throwRock(gameTime: number): void {
   if (!isSkillUnlocked('rock')) return;
   if (gameTime - lastRangedAttackTime < getRockCooldown()) return;
@@ -2256,10 +1847,10 @@ function throwRock(gameTime: number): void {
   const origin = character.position.clone();
   const triple = isAugmentUnlocked('rock_triple' as AugmentId);
   const spread = triple ? 0.15 : 0;
-  spawnOneRock(origin, target, 0);
+  rocksApi.throw(origin, target, 0);
   if (triple) {
-    spawnOneRock(origin, target, spread);
-    spawnOneRock(origin, target, -spread);
+    rocksApi.throw(origin, target, spread);
+    rocksApi.throw(origin, target, -spread);
   }
 }
 
@@ -2268,6 +1859,7 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     if (!isDead) setPaused(!isPaused);
     if (skillTreeOpen) setSkillTreeOpen(false);
+    if (inventoryOpen) setInventoryOpen(false);
     return;
   }
   if (e.key === 'k' || e.key === 'K') {
@@ -2279,133 +1871,37 @@ document.addEventListener('keydown', (e) => {
     }
     return;
   }
+  if (e.key === 'i' || e.key === 'I') {
+    e.preventDefault();
+    if (inventoryOpen) {
+      setInventoryOpen(false);
+    } else if (!isDead && !isPaused) {
+      setInventoryOpen(true);
+    }
+    return;
+  }
   if (e.key === 'q' || e.key === 'Q') {
     e.preventDefault();
-    if (!isDead && !isPaused && isSkillUnlocked('rock')) throwRock(gameTime);
+    if (isDead || isPaused) return;
+    const hasBow = equipment.getWeapon() === 'bow';
+    if (hasBow) {
+      const targetPos = getTargetPosition();
+      if (targetPos) {
+        const dist = character.position.distanceTo(targetPos);
+        if (dist <= BOW_RANGE && gameTime - lastBowAttackTime >= BOW_COOLDOWN) {
+          arrowsApi.shoot(character.position.clone(), targetPos);
+          lastBowAttackTime = gameTime;
+        }
+      }
+    } else if (isSkillUnlocked('rock')) {
+      throwRock(gameTime);
+    }
   }
   if (e.key === ' ') {
     e.preventDefault();
     if (!isDead && !isPaused) performMeleeAttack(gameTime);
   }
 });
-
-function updateRocks(dt: number): void {
-  const hitRadius = ENEMY_SIZE / 2 + ROCK_RADIUS;
-  for (let i = rocks.length - 1; i >= 0; i--) {
-    const rock = rocks[i];
-    rock.velocity.y -= PROJECTILE_GRAVITY * dt;
-    rock.mesh.position.addScaledVector(rock.velocity, dt);
-    rock.ttl -= dt;
-    if (rock.mesh.position.y < 0) {
-      scene.remove(rock.mesh);
-      (rock.mesh.geometry as THREE.BufferGeometry).dispose();
-      (rock.mesh.material as THREE.Material).dispose();
-      rocks.splice(i, 1);
-      continue;
-    }
-    if (rock.ttl <= 0) {
-      scene.remove(rock.mesh);
-      (rock.mesh.geometry as THREE.BufferGeometry).dispose();
-      (rock.mesh.material as THREE.Material).dispose();
-      rocks.splice(i, 1);
-      continue;
-    }
-    for (let j = 0; j < ENEMY_COUNT; j++) {
-      if (!enemyAlive[j]) continue;
-      if (rock.mesh.position.distanceTo(enemyPositions[j]) < hitRadius) {
-        damageRedCube(j, getRangedDamage());
-        scene.remove(rock.mesh);
-        (rock.mesh.geometry as THREE.BufferGeometry).dispose();
-        (rock.mesh.material as THREE.Material).dispose();
-        rocks.splice(i, 1);
-        break;
-      }
-    }
-    const rockCasterRadius = CASTER_SIZE / 2 + ROCK_RADIUS;
-    const rockResurrectorRadius = RESURRECTOR_SIZE / 2 + ROCK_RADIUS;
-    for (let c = 0; c < CASTER_COUNT; c++) {
-      if (!casterAlive[c]) continue;
-      if (rock.mesh.position.distanceTo(casterMeshes[c].position) < rockCasterRadius) {
-        damageCaster(c, getRangedDamage());
-        scene.remove(rock.mesh);
-        (rock.mesh.geometry as THREE.BufferGeometry).dispose();
-        (rock.mesh.material as THREE.Material).dispose();
-        rocks.splice(i, 1);
-        break;
-      }
-    }
-    for (let r = 0; r < RESURRECTOR_COUNT; r++) {
-      if (!resurrectorAlive[r]) continue;
-      if (rock.mesh.position.distanceTo(resurrectorMeshes[r].position) < rockResurrectorRadius) {
-        damageResurrector(r, getRangedDamage());
-        scene.remove(rock.mesh);
-        (rock.mesh.geometry as THREE.BufferGeometry).dispose();
-        (rock.mesh.material as THREE.Material).dispose();
-        rocks.splice(i, 1);
-        break;
-      }
-    }
-    // Check boss
-    if (bossAlive && rock.mesh.position.distanceTo(BOSS_POSITION) < BOSS_HITBOX_RADIUS + ROCK_RADIUS) {
-      damageBoss(getRangedDamage());
-      scene.remove(rock.mesh);
-      (rock.mesh.geometry as THREE.BufferGeometry).dispose();
-      (rock.mesh.material as THREE.Material).dispose();
-      rocks.splice(i, 1);
-      continue;
-    }
-  }
-}
-
-function updateSword(dt: number, gameTime: number): void {
-  const hasSword = isSkillUnlocked('sword');
-  const hasTwin = isAugmentUnlocked('sword_twin' as AugmentId);
-  swordOrbit.visible = hasSword;
-  swordOrbit2.visible = hasSword && hasTwin;
-  if (!hasSword) return;
-  const orbitR = getSwordOrbitRadius();
-  const hitR = getSwordHitRadius();
-  const hitCooldown = getSwordHitCooldown();
-  swordMesh.position.x = orbitR;
-  swordOrbit.position.copy(character.position);
-  swordOrbit.rotation.y += SWORD_ANGULAR_SPEED * dt;
-  swordMesh.getWorldPosition(swordWorldPos);
-  if (hasTwin) {
-    swordMesh2.position.x = orbitR;
-    swordOrbit2.position.copy(character.position);
-    swordOrbit2.rotation.y -= SWORD_ANGULAR_SPEED * dt;
-    swordMesh2.getWorldPosition(swordWorldPos2);
-  }
-  const hitDist = ENEMY_SIZE / 2 + hitR;
-  const checkHit = (worldPos: THREE.Vector3) => {
-    for (let j = 0; j < ENEMY_COUNT; j++) {
-      if (!enemyAlive[j]) continue;
-      if (gameTime - lastSwordHitByEnemy[j] < hitCooldown) continue;
-      if (worldPos.distanceTo(enemyPositions[j]) < hitDist) {
-        damageRedCube(j, getMeleeDamage());
-        lastSwordHitByEnemy[j] = gameTime;
-      }
-    }
-    for (let c = 0; c < CASTER_COUNT; c++) {
-      if (!casterAlive[c]) continue;
-      if (worldPos.distanceTo(casterMeshes[c].position) < CASTER_SIZE / 2 + hitR) {
-        damageCaster(c, getMeleeDamage());
-      }
-    }
-    for (let r = 0; r < RESURRECTOR_COUNT; r++) {
-      if (!resurrectorAlive[r]) continue;
-      if (worldPos.distanceTo(resurrectorMeshes[r].position) < RESURRECTOR_SIZE / 2 + hitR) {
-        damageResurrector(r, getMeleeDamage());
-      }
-    }
-    // Check boss
-    if (bossAlive && worldPos.distanceTo(BOSS_POSITION) < BOSS_HITBOX_RADIUS + hitR) {
-      damageBoss(getMeleeDamage());
-    }
-  };
-  checkHit(swordWorldPos);
-  if (hasTwin) checkHit(swordWorldPos2);
-}
 
 function updateCasters(dt: number, gameTime: number): void {
   const charPos = character.position;
@@ -2480,10 +1976,10 @@ function updateCasters(dt: number, gameTime: number): void {
     }
     
     // Collision with boss
-    if (bossAlive) {
-      const toBoss = new THREE.Vector3().subVectors(pos, BOSS_POSITION);
+    if (bossApi.isAlive()) {
+      const toBoss = new THREE.Vector3().subVectors(pos, bossApi.getPosition());
       const dist = toBoss.length();
-      const minDist = CASTER_COLLISION_RADIUS + BOSS_HITBOX_RADIUS;
+      const minDist = CASTER_COLLISION_RADIUS + bossApi.getHitboxRadius();
       if (dist < minDist && dist > 0.001) {
         const overlap = minDist - dist;
         toBoss.normalize();
@@ -2618,10 +2114,10 @@ function updateResurrectors(dt: number, gameTime: number): void {
     }
     
     // Collision with boss
-    if (bossAlive) {
-      const toBoss = new THREE.Vector3().subVectors(pos, BOSS_POSITION);
+    if (bossApi.isAlive()) {
+      const toBoss = new THREE.Vector3().subVectors(pos, bossApi.getPosition());
       const dist = toBoss.length();
-      const minDist = RESURRECTOR_COLLISION_RADIUS + BOSS_HITBOX_RADIUS;
+      const minDist = RESURRECTOR_COLLISION_RADIUS + bossApi.getHitboxRadius();
       if (dist < minDist && dist > 0.001) {
         const overlap = minDist - dist;
         toBoss.normalize();
@@ -2663,149 +2159,6 @@ function updateResurrectors(dt: number, gameTime: number): void {
         bodies.splice(nearestIdx, 1);
         lastResurrectorResurrectTime[r] = gameTime;
       }
-    }
-  }
-}
-
-function updateBoss(dt: number, gameTime: number): void {
-  if (!bossAlive) return;
-  
-  // Boss throws fireballs at player
-  if (gameTime - lastBossFireballTime >= BOSS_FIREBALL_COOLDOWN) {
-    lastBossFireballTime = gameTime;
-    const charPos = character.position;
-    const targetPos = charPos.clone();
-    targetPos.y = 0;
-    
-    // Create fireball
-    const mesh = createBossFireballMesh();
-    mesh.position.copy(BOSS_POSITION);
-    mesh.position.y = BOSS_SIZE * 0.8 * 10; // Adjust for 10x scale
-    scene.add(mesh);
-    
-    // Calculate velocity for fixed travel time
-    const vel = new THREE.Vector3();
-    const travelTime = BOSS_FIREBALL_WARNING_DURATION;
-    const startPos = BOSS_POSITION.clone();
-    startPos.y = BOSS_SIZE * 0.8 * 10; // Adjust for 10x scale
-    
-    // Calculate horizontal distance
-    const dx = targetPos.x - startPos.x;
-    const dz = targetPos.z - startPos.z;
-    const horizontalDist = Math.sqrt(dx * dx + dz * dz);
-    
-    // Horizontal velocity to cover distance in fixed time
-    if (horizontalDist > 0.01) {
-      vel.x = (dx / horizontalDist) * (horizontalDist / travelTime);
-      vel.z = (dz / horizontalDist) * (horizontalDist / travelTime);
-    } else {
-      vel.x = 0;
-      vel.z = 0;
-    }
-    
-    // Vertical velocity: need to land at y=0 after travelTime
-    // y(t) = y0 + vy*t - 0.5*g*t^2
-    // 0 = y0 + vy*t - 0.5*g*t^2
-    // vy = (0.5*g*t^2 - y0) / t
-    const y0 = startPos.y;
-    vel.y = (0.5 * PROJECTILE_GRAVITY * travelTime * travelTime - y0) / travelTime;
-    
-    // Create ground indicators
-    const indicators = createBossFireballIndicator(targetPos);
-    
-    bossFireballs.push({
-      mesh,
-      velocity: vel,
-      ttl: 5,
-      targetPosition: targetPos,
-      warningTime: gameTime,
-      indicatorOuter: indicators.outer,
-      indicatorInner: indicators.inner,
-    });
-  }
-}
-
-function updateBossFireballs(dt: number, gameTime: number): void {
-  const charPos = character.position;
-  for (let i = bossFireballs.length - 1; i >= 0; i--) {
-    const bf = bossFireballs[i];
-    const timeSinceWarning = gameTime - bf.warningTime;
-    
-    // Update ground indicators
-    if (timeSinceWarning < BOSS_FIREBALL_WARNING_DURATION) {
-      // Inner ring expands from center to outer ring
-      const t = timeSinceWarning / BOSS_FIREBALL_WARNING_DURATION;
-      const innerRadius = 0.1 + (BOSS_FIREBALL_EXPLOSION_RADIUS * 0.9 - 0.1) * t;
-      const innerThickness = 0.2 + (0.1 - 0.2) * t; // Gets thinner as it expands
-      
-      // Update inner ring geometry
-      bf.indicatorInner.geometry.dispose();
-      bf.indicatorInner.geometry = new THREE.RingGeometry(
-        Math.max(0.05, innerRadius - innerThickness),
-        innerRadius,
-        24
-      );
-      
-      // Fade outer ring slightly
-      const outerMat = bf.indicatorOuter.material as THREE.MeshBasicMaterial;
-      outerMat.opacity = 0.6 * (1 - t * 0.3);
-      
-      // Brighten inner ring as it expands
-      const innerMat = bf.indicatorInner.material as THREE.MeshBasicMaterial;
-      innerMat.opacity = 0.8 + 0.2 * t;
-      innerMat.color.setHex(0xffaa00 + Math.floor(t * 0x550000)); // Gets redder
-    }
-    
-    // Move fireball
-    bf.velocity.y -= PROJECTILE_GRAVITY * dt;
-    bf.mesh.position.addScaledVector(bf.velocity, dt);
-    bf.ttl -= dt;
-    
-    // Check if fireball hit ground or reached target
-    if (bf.mesh.position.y <= 0 || timeSinceWarning >= BOSS_FIREBALL_WARNING_DURATION) {
-      bf.mesh.position.y = 0;
-      
-      // Explosion!
-      const explosionPos = bf.targetPosition;
-      if (charPos.distanceTo(explosionPos) <= BOSS_FIREBALL_EXPLOSION_RADIUS) {
-        if (!isDamageBlocked('mage')) {
-          setHealth(health - BOSS_FIREBALL_DAMAGE);
-          // Set player on fire
-          playerBurning = true;
-          playerBurnStartTime = gameTime;
-          lastBurnTickTime = gameTime;
-        }
-      }
-      
-      // Create explosion effect
-      enemyAttackHitEffects.push(createEnemyAttackHitEffect(explosionPos));
-      
-      // Clean up
-      scene.remove(bf.mesh);
-      (bf.mesh.geometry as THREE.BufferGeometry).dispose();
-      (bf.mesh.material as THREE.Material).dispose();
-      bossFireballIndicatorGroup.remove(bf.indicatorOuter);
-      bossFireballIndicatorGroup.remove(bf.indicatorInner);
-      (bf.indicatorOuter.geometry as THREE.BufferGeometry).dispose();
-      (bf.indicatorOuter.material as THREE.Material).dispose();
-      (bf.indicatorInner.geometry as THREE.BufferGeometry).dispose();
-      (bf.indicatorInner.material as THREE.Material).dispose();
-      bossFireballs.splice(i, 1);
-      continue;
-    }
-    
-    if (bf.ttl <= 0) {
-      // Clean up if TTL expired
-      scene.remove(bf.mesh);
-      (bf.mesh.geometry as THREE.BufferGeometry).dispose();
-      (bf.mesh.material as THREE.Material).dispose();
-      bossFireballIndicatorGroup.remove(bf.indicatorOuter);
-      bossFireballIndicatorGroup.remove(bf.indicatorInner);
-      (bf.indicatorOuter.geometry as THREE.BufferGeometry).dispose();
-      (bf.indicatorOuter.material as THREE.Material).dispose();
-      (bf.indicatorInner.geometry as THREE.BufferGeometry).dispose();
-      (bf.indicatorInner.material as THREE.Material).dispose();
-      bossFireballs.splice(i, 1);
     }
   }
 }
@@ -2940,10 +2293,10 @@ function updateEnemies(dt: number, gameTime: number): void {
     }
     
     // Collision with boss
-    if (bossAlive) {
-      const toBoss = new THREE.Vector3().subVectors(pos, BOSS_POSITION);
+    if (bossApi.isAlive()) {
+      const toBoss = new THREE.Vector3().subVectors(pos, bossApi.getPosition());
       const dist = toBoss.length();
-      const minDist = ENEMY_COLLISION_RADIUS + BOSS_HITBOX_RADIUS;
+      const minDist = ENEMY_COLLISION_RADIUS + bossApi.getHitboxRadius();
       if (dist < minDist && dist > 0.001) {
         const overlap = minDist - dist;
         toBoss.normalize();
@@ -3022,35 +2375,43 @@ const gameLoop = new GameLoop(
         (ef.mesh.geometry as THREE.BufferGeometry).dispose();
         (ef.mesh.material as THREE.Material).dispose();
       }
-      // Clean up boss fireballs
-      while (bossFireballs.length > 0) {
-        const bf = bossFireballs.pop()!;
-        scene.remove(bf.mesh);
-        (bf.mesh.geometry as THREE.BufferGeometry).dispose();
-        (bf.mesh.material as THREE.Material).dispose();
-        bossFireballIndicatorGroup.remove(bf.indicatorOuter);
-        bossFireballIndicatorGroup.remove(bf.indicatorInner);
-        (bf.indicatorOuter.geometry as THREE.BufferGeometry).dispose();
-        (bf.indicatorOuter.material as THREE.Material).dispose();
-        (bf.indicatorInner.geometry as THREE.BufferGeometry).dispose();
-        (bf.indicatorInner.material as THREE.Material).dispose();
-      }
+      bossApi.clearFireballs();
       waves.startWave(waves.getCurrentWave() + 1);
     }
     updateCharacterMove(dt);
     updatePlayerCollisions(dt);
-    updateEquippedSword(gameTime);
+    const combatState = buildCombatState();
+    swordApi.update(dt, gameTime, combatState);
     updateAutoAttack(dt, gameTime);
     updateEnemies(dt, gameTime);
     updateEnemyAttackHitEffects(gameTime);
     updateCasters(dt, gameTime);
     updateResurrectors(dt, gameTime);
-    updateBoss(dt, gameTime);
-    updateBossFireballs(dt, gameTime);
-    updateBurningEffect(gameTime);
-    updateSword(dt, gameTime);
-    updateFireballs(dt);
-    updateRocks(dt);
+    teleportersApi.update(dt, gameTime, character.position);
+    bossApi.update(dt, gameTime);
+    const inPoisonPool = poisonPoolsApi.update(gameTime, character.position);
+    if (inPoisonPool && !playerPoisoned) {
+      playerPoisoned = true;
+      playerPoisonStartTime = gameTime;
+    }
+    if (playerPoisoned) {
+      const poisonAge = gameTime - playerPoisonStartTime;
+      if (poisonAge >= POISON_DURATION) {
+        playerPoisoned = false;
+      } else if (gameTime - lastPoisonTickTime >= POISON_TICK_INTERVAL) {
+        setHealth(health - POISON_DAMAGE_PER_TICK);
+        lastPoisonTickTime = gameTime;
+      }
+    }
+    playerBurnVisuals.update(gameTime);
+    playerPoisonVisuals.update(gameTime);
+    fireballsApi.update(dt, combatState);
+    rocksApi.update(dt, combatState);
+    if (pendingBowShotTarget) {
+      arrowsApi.shoot(character.position.clone(), pendingBowShotTarget);
+      pendingBowShotTarget = null;
+    }
+    arrowsApi.update(dt, combatState);
     updateEnemyFireballs(dt);
     updatePickups(dt);
   },
@@ -3070,74 +2431,52 @@ const gameLoop = new GameLoop(
     if (dt > 0) {
       const instant = 1 / dt;
       smoothedFps += (instant - smoothedFps) * 0.08;
-      fpsEl.textContent = `${Math.round(smoothedFps)} FPS`;
     }
-    timerEl.textContent = `Time: ${formatTime(runTime)}`;
     const camera = isoCamera.three;
-    for (let j = 0; j < ENEMY_COUNT; j++) {
-      const bar = enemyHealthBarEls[j];
-      if (!enemyAlive[j]) {
-        bar.wrap.style.visibility = 'hidden';
-        continue;
-      }
-      healthBarProjectionVec.set(enemyPositions[j].x, enemyPositions[j].y + HEALTH_BAR_Y_OFFSET, enemyPositions[j].z);
-      healthBarProjectionVec.project(camera);
-      const px = (healthBarProjectionVec.x * 0.5 + 0.5) * cw;
-      const py = (1 - (healthBarProjectionVec.y * 0.5 + 0.5)) * ch;
-      bar.wrap.style.left = `${px - ENEMY_HEALTH_BAR_WIDTH / 2}px`;
-      bar.wrap.style.top = `${py - ENEMY_HEALTH_BAR_HEIGHT - 4}px`;
-      bar.wrap.style.visibility = 'visible';
-      bar.fill.style.width = `${(enemyHealth[j] / MAX_ENEMY_HEALTH) * 100}%`;
-    }
-    for (let c = 0; c < CASTER_COUNT; c++) {
-      const bar = casterHealthBarEls[c];
-      if (!casterAlive[c]) {
-        bar.wrap.style.visibility = 'hidden';
-        continue;
-      }
-      const pos = casterMeshes[c].position;
-      healthBarProjectionVec.set(pos.x, pos.y + HEALTH_BAR_Y_OFFSET, pos.z);
-      healthBarProjectionVec.project(camera);
-      const px = (healthBarProjectionVec.x * 0.5 + 0.5) * cw;
-      const py = (1 - (healthBarProjectionVec.y * 0.5 + 0.5)) * ch;
-      bar.wrap.style.left = `${px - ENEMY_HEALTH_BAR_WIDTH / 2}px`;
-      bar.wrap.style.top = `${py - ENEMY_HEALTH_BAR_HEIGHT - 4}px`;
-      bar.wrap.style.visibility = 'visible';
-      bar.fill.style.width = `${(casterHealth[c] / MAX_CASTER_HEALTH) * 100}%`;
-    }
-    for (let r = 0; r < RESURRECTOR_COUNT; r++) {
-      const bar = resurrectorHealthBarEls[r];
-      if (!resurrectorAlive[r]) {
-        bar.wrap.style.visibility = 'hidden';
-        continue;
-      }
-      const pos = resurrectorMeshes[r].position;
-      healthBarProjectionVec.set(pos.x, pos.y + HEALTH_BAR_Y_OFFSET, pos.z);
-      healthBarProjectionVec.project(camera);
-      const px = (healthBarProjectionVec.x * 0.5 + 0.5) * cw;
-      const py = (1 - (healthBarProjectionVec.y * 0.5 + 0.5)) * ch;
-      bar.wrap.style.left = `${px - ENEMY_HEALTH_BAR_WIDTH / 2}px`;
-      bar.wrap.style.top = `${py - ENEMY_HEALTH_BAR_HEIGHT - 4}px`;
-      bar.wrap.style.visibility = 'visible';
-      bar.fill.style.width = `${(resurrectorHealth[r] / MAX_RESURRECTOR_HEALTH) * 100}%`;
-    }
-    // Boss health bar and hitbox indicator
-    if (!bossAlive) {
-      bossHealthBarEl.wrap.style.visibility = 'hidden';
-      bossHitboxIndicator.visible = false;
-    } else {
-      bossHitboxIndicator.visible = true;
-      healthBarProjectionVec.set(BOSS_POSITION.x, BOSS_POSITION.y + HEALTH_BAR_Y_OFFSET, BOSS_POSITION.z);
-      healthBarProjectionVec.project(camera);
-      const px = (healthBarProjectionVec.x * 0.5 + 0.5) * cw;
-      const py = (1 - (healthBarProjectionVec.y * 0.5 + 0.5)) * ch;
-      bossHealthBarEl.wrap.style.left = `${px - ENEMY_HEALTH_BAR_WIDTH / 2}px`;
-      bossHealthBarEl.wrap.style.top = `${py - ENEMY_HEALTH_BAR_HEIGHT - 4}px`;
-      bossHealthBarEl.wrap.style.visibility = 'visible';
-      bossHealthBarEl.fill.style.width = `${(bossHealth / MAX_BOSS_HEALTH) * 100}%`;
-    }
+    const hudState: HUDState = {
+      canvasWidth: cw,
+      canvasHeight: ch,
+      camera,
+      runTime,
+      smoothedFps,
+      health,
+      maxHealth: getMaxHealth(),
+      mana,
+      maxMana: MAX_MANA,
+      level,
+      xp,
+      xpForNextLevel: getXpForNextLevel(),
+      strength,
+      intelligence,
+      dexterity,
+      vitality,
+      currentWave: waves.getCurrentWave(),
+      enemyPositions,
+      enemyAlive,
+      enemyHealth,
+      enemyMaxHealth: MAX_ENEMY_HEALTH,
+      casterPositions: casterMeshes.map((m) => m.position),
+      casterAlive,
+      casterHealth,
+      casterMaxHealth: MAX_CASTER_HEALTH,
+      resurrectorPositions: resurrectorMeshes.map((m) => m.position),
+      resurrectorAlive,
+      resurrectorHealth,
+      resurrectorMaxHealth: MAX_RESURRECTOR_HEALTH,
+      teleporterPositions: teleportersApi.getPositions(),
+      teleporterAlive: teleportersApi.getAlive(),
+      teleporterHealth: teleportersApi.getHealthArray(),
+      teleporterMaxHealth: teleportersApi.getMaxHealth(),
+      bossPosition: bossApi.getPosition(),
+      bossAlive: bossApi.isAlive(),
+      bossHealth: bossApi.getHealth(),
+      bossMaxHealth: bossApi.getMaxHealth(),
+    };
+    hud.update(hudState);
+    bossApi.getHitboxIndicator().visible = bossApi.isAlive();
     // Update floating hit markers
     updateHitMarkers(now / 1000, camera, cw, ch);
+    groundItemsApi.updateLabels();
     renderer.render(scene, isoCamera.three);
   }
 );
