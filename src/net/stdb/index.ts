@@ -38,6 +38,10 @@ import OnConnectReducer from "./on_connect_reducer";
 export { OnConnectReducer };
 import OnDisconnectReducer from "./on_disconnect_reducer";
 export { OnDisconnectReducer };
+import RegisterAccountReducer from "./register_account_reducer";
+export { RegisterAccountReducer };
+import LoginWithPasswordReducer from "./login_with_password_reducer";
+export { LoginWithPasswordReducer };
 import RunServerTickReducer from "./run_server_tick_reducer";
 export { RunServerTickReducer };
 import MoveReducer from "./move_reducer";
@@ -56,10 +60,14 @@ import IdGenRow from "./id_gen_table";
 export { IdGenRow };
 import PlayerRow from "./player_table";
 export { PlayerRow };
+import TerrainChunkRow from "./terrain_chunk_table";
+export { TerrainChunkRow };
 import TerrainStrokeRow from "./terrain_stroke_table";
 export { TerrainStrokeRow };
 import TickJobRow from "./tick_job_table";
 export { TickJobRow };
+import UserCredentialsRow from "./user_credentials_table";
+export { UserCredentialsRow };
 import WorldStateRow from "./world_state_table";
 export { WorldStateRow };
 
@@ -72,6 +80,8 @@ import IdGen from "./id_gen_type";
 export { IdGen };
 import Init from "./init_type";
 export { Init };
+import LoginWithPassword from "./login_with_password_type";
+export { LoginWithPassword };
 import Move from "./move_type";
 export { Move };
 import OnConnect from "./on_connect_type";
@@ -80,14 +90,20 @@ import OnDisconnect from "./on_disconnect_type";
 export { OnDisconnect };
 import Player from "./player_type";
 export { Player };
+import RegisterAccount from "./register_account_type";
+export { RegisterAccount };
 import RunServerTick from "./run_server_tick_type";
 export { RunServerTick };
+import TerrainChunk from "./terrain_chunk_type";
+export { TerrainChunk };
 import TerrainEdit from "./terrain_edit_type";
 export { TerrainEdit };
 import TerrainStroke from "./terrain_stroke_type";
 export { TerrainStroke };
 import TickJob from "./tick_job_type";
 export { TickJob };
+import UserCredentials from "./user_credentials_type";
+export { UserCredentials };
 import WorldState from "./world_state_type";
 export { WorldState };
 
@@ -130,6 +146,17 @@ const tablesSchema = __schema(
     ],
   }, PlayerRow),
   __table({
+    name: 'terrain_chunk',
+    indexes: [
+      { name: 'chunkKey', algorithm: 'btree', columns: [
+        'chunkKey',
+      ] },
+    ],
+    constraints: [
+      { name: 'terrain_chunk_chunkKey_key', constraint: 'unique', columns: ['chunkKey'] },
+    ],
+  }, TerrainChunkRow),
+  __table({
     name: 'terrain_stroke',
     indexes: [
       { name: 'id', algorithm: 'btree', columns: [
@@ -152,6 +179,20 @@ const tablesSchema = __schema(
     ],
   }, TickJobRow),
   __table({
+    name: 'user_credentials',
+    indexes: [
+      { name: 'by_bound_owner', algorithm: 'btree', columns: [
+        'boundOwner',
+      ] },
+      { name: 'username', algorithm: 'btree', columns: [
+        'username',
+      ] },
+    ],
+    constraints: [
+      { name: 'user_credentials_username_key', constraint: 'unique', columns: ['username'] },
+    ],
+  }, UserCredentialsRow),
+  __table({
     name: 'world_state',
     indexes: [
       { name: 'id', algorithm: 'btree', columns: [
@@ -166,6 +207,8 @@ const tablesSchema = __schema(
 
 /** The schema information for all reducers in this module. This is defined the same way as the reducers would have been defined in the server, except the body of the reducer is omitted in code generation. */
 const reducersSchema = __reducers(
+  __reducerSchema("register_account", RegisterAccountReducer),
+  __reducerSchema("login_with_password", LoginWithPasswordReducer),
   __reducerSchema("run_server_tick", RunServerTickReducer),
   __reducerSchema("move", MoveReducer),
   __reducerSchema("emit_hit_splat", EmitHitSplatReducer),

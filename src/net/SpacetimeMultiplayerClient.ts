@@ -1,4 +1,5 @@
 import type { Infer } from 'spacetimedb';
+import { affectedChunkKeysForTerrainBrush } from '../../shared/chunkTerrainMutations';
 import type { TerrainPaintMode } from '../../shared/terrainBrush';
 import {
   AOI_MAX_TILE_RADIUS,
@@ -7,19 +8,26 @@ import {
   tileCenterXZ,
 } from '../../shared/world';
 import type { NetPeer, ServerMsg } from '../../shared/protocol';
-import { DbConnection, type EventContext } from './stdb';
+import { DbConnection, type EventContext, type ReducerEventContext } from './stdb';
 import HitSplatTbl from './stdb/hit_splat_table';
 import PlayerTbl from './stdb/player_table';
-import TerrainStrokeTbl from './stdb/terrain_stroke_table';
+import TerrainChunkTbl from './stdb/terrain_chunk_table';
 import type { MultiplayerHandlers } from './MultiplayerClient';
 
 type PlayerRow = Infer<typeof PlayerTbl>;
 type HitSplatRow = Infer<typeof HitSplatTbl>;
-type TerrainStrokeRow = Infer<typeof TerrainStrokeTbl>;
+type TerrainChunkRow = Infer<typeof TerrainChunkTbl>;
+
+/** {@link DbConnectionImpl.isActive} — WebSocket is OPEN; safe to call reducers. */
+type DbConnectionWithActive = DbConnection & { isActive: boolean };
 
 export interface SpacetimeMultiplayerConfig {
   uri: string;
   moduleName: string;
+  /** When set, the token from {@link DbConnection} `onConnect` is persisted for reconnects. */
+  authTokenStorageKey?: string;
+  /** Cleared with the auth token on {@link logout} / {@link clearStoredAuthToken}. */
+  usernameStorageKey?: string;
 }
 
 function peerDto(p: PlayerRow): NetPeer {
@@ -56,6 +64,7 @@ export class SpacetimeMultiplayerClient {
   private welcomeSent = false;
   /** Latest known public id for this connection (set once `player` row exists). */
   private selfPublicId: number | null = null;
+  private spacetimeSnapshotNotified = false;
 
   constructor(
     private readonly config: SpacetimeMultiplayerConfig,
@@ -68,23 +77,45 @@ export class SpacetimeMultiplayerClient {
     return null;
   }
 
-  connect(_name?: string): void {
+  /**
+   * @param opts.token pass `null` to connect anonymously (ignore stored token). Otherwise stored token is used when `authTokenStorageKey` is set.
+   */
+  connect(opts?: { token?: string | null }): void {
     if (this.conn !== null) return;
+
+    let initialToken: string | undefined;
+    if (opts?.token !== undefined) {
+      initialToken = opts.token === null ? undefined : opts.token || undefined;
+    } else if (this.config.authTokenStorageKey) {
+      initialToken = localStorage.getItem(this.config.authTokenStorageKey) ?? undefined;
+    }
 
     this.conn = DbConnection.builder()
       .withUri(this.config.uri)
       .withModuleName(this.config.moduleName)
-      .onDisconnect(() => {
+      .withToken(initialToken)
+      .onDisconnect((closedConn) => {
+        // A new socket may already be `this.conn`; only clear if this close is for the active one.
+        if (this.conn !== closedConn) return;
         this.conn = null;
         this.identityHex = null;
         this.welcomeSent = false;
         this.selfPublicId = null;
+        this.spacetimeSnapshotNotified = false;
       })
       .onConnectError((_ctx, err) => {
         console.warn('[spacetimedb]', err);
+        this.handlers.onSpacetimeConnectError?.(
+          typeof err === 'object' && err !== null && 'message' in err
+            ? String((err as { message?: unknown }).message ?? err)
+            : String(err)
+        );
       })
-      .onConnect((conn, identity) => {
+      .onConnect((conn, identity, token) => {
         this.identityHex = identity.toHexString();
+        if (this.config.authTokenStorageKey && token) {
+          localStorage.setItem(this.config.authTokenStorageKey, token);
+        }
         this.welcomeSent = false;
         this.selfPublicId = null;
         this.attachRowCallbacks(conn);
@@ -93,12 +124,17 @@ export class SpacetimeMultiplayerClient {
           .onApplied(() => {
             this.emitWelcomeIfNeeded(conn);
             this.emitSnap(conn);
+            this.syncAllTerrainChunks(conn);
+            if (!this.spacetimeSnapshotNotified) {
+              this.spacetimeSnapshotNotified = true;
+              this.handlers.onSpacetimeSubscriptionApplied?.();
+            }
           })
           .subscribe([
             'SELECT * FROM player',
             'SELECT * FROM world_state',
             'SELECT * FROM hit_splat',
-            'SELECT * FROM terrain_stroke',
+            'SELECT * FROM terrain_chunk',
           ]);
       })
       .build();
@@ -132,22 +168,34 @@ export class SpacetimeMultiplayerClient {
       };
       this.handlers.onPeerHitSplat?.(msg);
     });
-    conn.db.terrainStroke.onInsert((_ctx: EventContext, row: TerrainStrokeRow) => {
-      if (this.selfPublicId !== null && row.fromPublicId === this.selfPublicId) {
-        return;
-      }
-      const msg: Extract<ServerMsg, { t: 'terrainEdit' }> = {
-        t: 'terrainEdit',
-        fromPlayerId: row.fromPublicId,
-        tx: row.tx,
-        tz: row.tz,
-        mode: row.mode as TerrainPaintMode,
-        textureIndex: row.textureIndex,
-        heightStep: row.heightStep,
-        brushRadius: row.brushRadius,
-      };
-      this.handlers.onTerrainEditFromPeer?.(msg);
+    conn.db.terrainChunk.onInsert((_ctx: EventContext, row: TerrainChunkRow) => {
+      this.emitTerrainChunk(row);
     });
+    conn.db.terrainChunk.onUpdate(
+      (_ctx: EventContext, _oldRow: TerrainChunkRow, row: TerrainChunkRow) => {
+        this.emitTerrainChunk(row);
+      }
+    );
+    conn.reducers.onTerrainEdit((ctx: ReducerEventContext, args) => {
+      if (ctx.event.status.tag !== 'Committed') return;
+      const keys = affectedChunkKeysForTerrainBrush(args.tx, args.tz, args.brushRadius);
+      for (const k of keys) {
+        const row = conn.db.terrainChunk.chunkKey.find(k);
+        if (row) {
+          this.emitTerrainChunk(row);
+        }
+      }
+    });
+  }
+
+  private syncAllTerrainChunks(conn: DbConnection): void {
+    for (const row of conn.db.terrainChunk.iter()) {
+      this.emitTerrainChunk(row);
+    }
+  }
+
+  private emitTerrainChunk(row: TerrainChunkRow): void {
+    this.handlers.onTerrainChunkFromServer?.(row.chunkKey, row.json);
   }
 
   private findSelf(conn: DbConnection): PlayerRow | undefined {
@@ -228,5 +276,95 @@ export class SpacetimeMultiplayerClient {
     this.identityHex = null;
     this.welcomeSent = false;
     this.selfPublicId = null;
+    this.spacetimeSnapshotNotified = false;
+  }
+
+  clearStoredAuthToken(): void {
+    if (this.config.authTokenStorageKey) {
+      localStorage.removeItem(this.config.authTokenStorageKey);
+    }
+    if (this.config.usernameStorageKey) {
+      localStorage.removeItem(this.config.usernameStorageKey);
+    }
+  }
+
+  logout(): void {
+    this.clearStoredAuthToken();
+    this.disconnect();
+  }
+
+  registerAccount(username: string, password: string): Promise<void> {
+    return this.invokePasswordReducer('register', { username, password });
+  }
+
+  loginWithPassword(username: string, password: string): Promise<void> {
+    return this.invokePasswordReducer('login', { username, password });
+  }
+
+  /**
+   * Password reducers require an open WebSocket and Identity from the server.
+   * `this.conn` is set when the SDK builds, but `identityHex` is only set in `onConnect`;
+   * after logout/reconnect, callers can run before that completes unless we wait here.
+   */
+  private async waitForUsableConnection(): Promise<DbConnection> {
+    const maxMs = 25_000;
+    const started = performance.now();
+    while (performance.now() - started < maxMs) {
+      const c = this.conn as DbConnectionWithActive | null;
+      if (c !== null && this.identityHex !== null && c.isActive) {
+        return c;
+      }
+      if (this.conn === null) {
+        this.connect();
+      }
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    throw new Error(
+      'Not connected to multiplayer. Check that SpacetimeDB is running, the module is published, and VITE_SPACETIMEDB_URI is correct.'
+    );
+  }
+
+  private invokePasswordReducer(
+    kind: 'register' | 'login',
+    params: { username: string; password: string }
+  ): Promise<void> {
+    return (async () => {
+      const conn = await this.waitForUsableConnection();
+      await new Promise<void>((resolve, reject) => {
+        const handler = (ctx: ReducerEventContext, _args: { username: string; password: string }) => {
+          if (
+            this.identityHex === null ||
+            ctx.event.callerIdentity.toHexString() !== this.identityHex
+          ) {
+            return;
+          }
+          const { tag } = ctx.event.status;
+          if (tag === 'Committed') {
+            unsub();
+            resolve();
+          } else {
+            unsub();
+            const msg =
+              tag === 'Failed'
+                ? ctx.event.status.value
+                : tag === 'OutOfEnergy'
+                  ? 'Out of energy'
+                  : 'Request failed';
+            reject(new Error(msg));
+          }
+        };
+        const unsub =
+          kind === 'register'
+            ? () => conn.reducers.removeOnRegisterAccount(handler)
+            : () => conn.reducers.removeOnLoginWithPassword(handler);
+        if (kind === 'register') {
+          conn.reducers.onRegisterAccount(handler);
+          conn.reducers.registerAccount(params);
+        } else {
+          conn.reducers.onLoginWithPassword(handler);
+          conn.reducers.loginWithPassword(params);
+        }
+      });
+    })();
   }
 }

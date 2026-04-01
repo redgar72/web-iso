@@ -4045,13 +4045,48 @@ const spacetimeModuleRaw =
     ? import.meta.env.VITE_SPACETIMEDB_MODULE.trim()
     : 'aidans-game';
 
+const useSpacetimeMp = spacetimeUriRaw.length > 0;
+const SPACETIME_TOKEN_KEY = 'web-iso:spacetimedb:token';
+/** Matches SpacetimeDB `normalizeUsername` (trim + lowercase); used for HUD and session display. */
+const SPACETIME_USERNAME_KEY = 'web-iso:spacetimedb:username';
+const spacetimeHadStoredTokenAtBoot =
+  spacetimeUriRaw.length > 0 && !!localStorage.getItem(SPACETIME_TOKEN_KEY);
+/** Until user confirms “Continue” on the resume card (saved token), or completes a fresh login. */
+let spacetimeRequireResumeConfirm = spacetimeHadStoredTokenAtBoot;
+/** Until SpacetimeDB `onWelcome`, ignore world snapshots so the character is not placed before login. */
+let spacetimeSessionReady = !useSpacetimeMp;
+let remountSpacetimeLoginForm: (() => void) | null = null;
+let beginSpacetimeAccountSwitch: (() => void) | null = null;
+
 let remotePlayersApi: ReturnType<typeof createRemotePlayers> | null = null;
 let multiplayerFirstSnap = true;
 let lastMultiplayerSentTile: GridTile | null = null;
 let lastMultiplayerSentGoal: GridTile | null = null;
 
 const multiplayerHandlers: MultiplayerHandlers = {
+  onWelcome() {
+    if (useSpacetimeMp) {
+      if (spacetimeRequireResumeConfirm) {
+        return;
+      }
+      spacetimeSessionReady = true;
+      document.getElementById('spacetime-login-overlay')?.style.setProperty('display', 'none');
+    }
+  },
+  onSpacetimeConnectError(msg) {
+    console.warn('[spacetimedb] connect error:', msg);
+    spacetimeRequireResumeConfirm = false;
+    spacetimeSessionReady = false;
+    const c = multiplayerClient;
+    if (c instanceof SpacetimeMultiplayerClient) {
+      c.logout();
+      c.connect({ token: null });
+    }
+    remountSpacetimeLoginForm?.();
+    document.getElementById('spacetime-login-overlay')?.style.setProperty('display', 'flex');
+  },
   onSnap(msg) {
+    if (useSpacetimeMp && !spacetimeSessionReady) return;
     if (multiplayerFirstSnap) {
       multiplayerFirstSnap = false;
       lastMultiplayerSentTile = null;
@@ -4078,16 +4113,181 @@ const multiplayerHandlers: MultiplayerHandlers = {
       msg.brushRadius
     );
   },
+  onTerrainChunkFromServer(chunkKeyStr, json) {
+    chunkTerrainLoader.ingestMultiplayerTerrainChunk(chunkKeyStr, json);
+  },
+  onSpacetimeSubscriptionApplied() {
+    const t = getPlayerPathTile();
+    void chunkTerrainLoader.syncToWorldTile(t.x, t.z);
+  },
 };
+
+function setupSpacetimeLoginGate(spacetimeClient: SpacetimeMultiplayerClient): void {
+  const overlay = document.createElement('div');
+  overlay.id = 'spacetime-login-overlay';
+  overlay.style.cssText = [
+    'position:fixed',
+    'inset:0',
+    'z-index:300',
+    'display:flex',
+    'align-items:center',
+    'justify-content:center',
+    'background:rgba(6,6,10,0.88)',
+    'backdrop-filter:blur(6px)',
+  ].join(';');
+  const shell = document.createElement('div');
+  shell.style.cssText =
+    'background:#14141c;border:1px solid rgba(255,255,255,0.12);border-radius:14px;padding:26px 28px;min-width:300px;max-width:400px;font:14px/1.4 system-ui,sans-serif;color:#e8e8ee';
+  const box = document.createElement('div');
+  box.id = 'spacetime-login-box';
+  shell.appendChild(box);
+  overlay.appendChild(shell);
+  document.body.appendChild(overlay);
+
+  function finishResumeAndEnter(): void {
+    spacetimeSessionReady = true;
+    spacetimeRequireResumeConfirm = false;
+    overlay.style.setProperty('display', 'none');
+  }
+
+  function beginAccountSwitch(): void {
+    spacetimeRequireResumeConfirm = false;
+    spacetimeSessionReady = false;
+    multiplayerFirstSnap = true;
+    spacetimeClient.logout();
+    mountLoginForm();
+    overlay.style.setProperty('display', 'flex');
+    spacetimeClient.connect({ token: null });
+  }
+
+  function mountResumeCard(): void {
+    box.replaceChildren();
+    const h2 = document.createElement('h2');
+    h2.textContent = 'Welcome back';
+    h2.style.cssText = 'margin:0 0 6px;font-size:18px;font-weight:600';
+    const p = document.createElement('p');
+    p.style.cssText = 'margin:0 0 18px;font-size:13px;color:#9a9aaa;line-height:1.45';
+    p.append('You have a saved session in this browser, signed in as ');
+    const strong = document.createElement('strong');
+    strong.style.color = '#e8e4f0';
+    strong.textContent = localStorage.getItem(SPACETIME_USERNAME_KEY) ?? 'your account';
+    p.appendChild(strong);
+    p.append('. Continue to play, or sign in with a different account.');
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:10px;flex-wrap:wrap';
+    const cont = document.createElement('button');
+    cont.type = 'button';
+    cont.textContent = 'Continue';
+    cont.style.cssText =
+      'flex:1;min-width:120px;padding:10px 14px;border-radius:8px;border:none;background:#3d6df0;color:#fff;font-weight:600;cursor:pointer';
+    cont.addEventListener('click', finishResumeAndEnter);
+    const sw = document.createElement('button');
+    sw.type = 'button';
+    sw.textContent = 'Use a different account';
+    sw.style.cssText =
+      'flex:1;min-width:120px;padding:10px 14px;border-radius:8px;border:1px solid rgba(255,255,255,0.2);background:transparent;color:#ddd;font-weight:600;cursor:pointer';
+    sw.addEventListener('click', beginAccountSwitch);
+    row.append(cont, sw);
+    const foot = document.createElement('p');
+    foot.style.cssText = 'margin:16px 0 0;font-size:11px;color:#6d6d7a;line-height:1.35';
+    foot.textContent =
+      'This uses a stored token (like “remember me”), not your password. Clear it anytime from Options → Sign out of multiplayer.';
+    box.append(h2, p, row, foot);
+  }
+
+  function mountLoginForm(): void {
+    box.innerHTML = `
+      <h2 style="margin:0 0 6px;font-size:18px;font-weight:600">Multiplayer</h2>
+      <p style="margin:0 0 18px;font-size:13px;color:#9a9aaa">Sign in with a username and password before joining the world.</p>
+      <label style="display:block;font-size:12px;color:#b4b4c4;margin-bottom:4px">Username</label>
+      <input id="spacetime-login-user" type="text" autocomplete="username" spellcheck="false" style="width:100%;box-sizing:border-box;margin-bottom:12px;padding:9px 10px;border-radius:8px;border:1px solid rgba(255,255,255,0.15);background:#0c0c12;color:#eee" />
+      <label style="display:block;font-size:12px;color:#b4b4c4;margin-bottom:4px">Password</label>
+      <input id="spacetime-login-pass" type="password" autocomplete="current-password" style="width:100%;box-sizing:border-box;margin-bottom:14px;padding:9px 10px;border-radius:8px;border:1px solid rgba(255,255,255,0.15);background:#0c0c12;color:#eee" />
+      <div id="spacetime-login-status" style="min-height:20px;font-size:13px;color:#ff6b6b;margin-bottom:8px"></div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        <button id="spacetime-login-btn" type="button" style="flex:1;min-width:120px;padding:10px 14px;border-radius:8px;border:none;background:#3d6df0;color:#fff;font-weight:600;cursor:pointer">Log in</button>
+        <button id="spacetime-register-btn" type="button" style="flex:1;min-width:120px;padding:10px 14px;border-radius:8px;border:1px solid rgba(255,255,255,0.2);background:transparent;color:#ddd;font-weight:600;cursor:pointer">Create account</button>
+      </div>
+      <p style="margin:16px 0 0;font-size:11px;color:#6d6d7a;line-height:1.35">Passwords are hashed on the module (SHA-256 + pepper). Change the pepper before any public deployment.</p>`;
+
+    const userEl = () => document.getElementById('spacetime-login-user') as HTMLInputElement;
+    const passEl = () => document.getElementById('spacetime-login-pass') as HTMLInputElement;
+    const statusEl = () => document.getElementById('spacetime-login-status') as HTMLDivElement;
+    const loginBtn = () => document.getElementById('spacetime-login-btn') as HTMLButtonElement;
+    const regBtn = () => document.getElementById('spacetime-register-btn') as HTMLButtonElement;
+
+    const setBusy = (busy: boolean) => {
+      loginBtn().disabled = busy;
+      regBtn().disabled = busy;
+    };
+
+    const run = async (mode: 'login' | 'register') => {
+      statusEl().textContent = '';
+      const username = userEl().value;
+      const password = passEl().value;
+      setBusy(true);
+      try {
+        if (mode === 'register') {
+          await spacetimeClient.registerAccount(username, password);
+        } else {
+          await spacetimeClient.loginWithPassword(username, password);
+        }
+        localStorage.setItem(SPACETIME_USERNAME_KEY, username.trim().toLowerCase());
+      } catch (e) {
+        statusEl().textContent = e instanceof Error ? e.message : String(e);
+      } finally {
+        setBusy(false);
+      }
+    };
+
+    loginBtn().addEventListener('click', () => void run('login'));
+    regBtn().addEventListener('click', () => void run('register'));
+  }
+
+  remountSpacetimeLoginForm = mountLoginForm;
+  beginSpacetimeAccountSwitch = () => {
+    setGameMenuOpen(false);
+    beginAccountSwitch();
+  };
+
+  if (spacetimeRequireResumeConfirm) {
+    mountResumeCard();
+  } else {
+    mountLoginForm();
+  }
+}
 
 if (spacetimeUriRaw.length > 0) {
   remotePlayersApi = createRemotePlayers();
   scene.add(remotePlayersApi.group);
-  multiplayerClient = new SpacetimeMultiplayerClient(
-    { uri: spacetimeUriRaw, moduleName: spacetimeModuleRaw },
+  const spacetimeClient = new SpacetimeMultiplayerClient(
+    {
+      uri: spacetimeUriRaw,
+      moduleName: spacetimeModuleRaw,
+      authTokenStorageKey: SPACETIME_TOKEN_KEY,
+      usernameStorageKey: SPACETIME_USERNAME_KEY,
+    },
     multiplayerHandlers
   );
-  multiplayerClient.connect();
+  multiplayerClient = spacetimeClient;
+  setupSpacetimeLoginGate(spacetimeClient);
+
+  const mpAccountHint = document.createElement('div');
+  mpAccountHint.style.cssText =
+    'font:11px sans-serif;color:rgba(255,255,255,0.5);line-height:1.35;margin:0 0 4px';
+  mpAccountHint.textContent =
+    'Multiplayer keeps this browser signed in with a saved token. Sign out here to use another account.';
+  const mpSignOutBtn = document.createElement('button');
+  mpSignOutBtn.type = 'button';
+  mpSignOutBtn.textContent = 'Sign out of multiplayer';
+  mpSignOutBtn.style.cssText =
+    'align-self:flex-start;padding:8px 12px;font:12px sans-serif;border-radius:8px;cursor:pointer;margin-bottom:12px;' +
+    'border:1px solid rgba(255,160,120,0.35);background:rgba(55,28,22,0.85);color:#f0ddd0;';
+  mpSignOutBtn.addEventListener('click', () => beginSpacetimeAccountSwitch?.());
+  optionsTabPane.insertBefore(mpAccountHint, displayTitle);
+  optionsTabPane.insertBefore(mpSignOutBtn, displayTitle);
+
+  spacetimeClient.connect();
 } else if (multiplayerUrl.length > 0) {
   remotePlayersApi = createRemotePlayers();
   scene.add(remotePlayersApi.group);
@@ -4098,6 +4298,7 @@ if (spacetimeUriRaw.length > 0) {
 /** Push path tile + move goal when either changes; pairs with immediate server broadcast for low latency. */
 function syncMultiplayerPathTile(): void {
   if (multiplayerClient === null) return;
+  if (useSpacetimeMp && !spacetimeSessionReady) return;
   const t = getPlayerPathTile();
   const goal: GridTile = moveGoalTile !== null ? moveGoalTile : t;
   if (
@@ -4474,6 +4675,7 @@ const gameLoop = new GameLoop(
       runEnabled: playerRunEnabled,
       runEnergy: playerRunEnergy,
       runEnergyMax: RUN_ENERGY_MAX,
+      accountUsername: useSpacetimeMp ? localStorage.getItem(SPACETIME_USERNAME_KEY) : null,
     };
     hud.update(hudState);
     minimap.update({

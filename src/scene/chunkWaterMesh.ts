@@ -43,11 +43,20 @@ function createSharedWaterMaterial(): THREE.MeshStandardMaterial {
       transformed.y += (nx * nz) * 0.038;
       `
     );
+    // worldpos_vertex omits `worldPosition` unless several USE_* flags are set; compute world XZ from `transformed` instead.
     shader.vertexShader = shader.vertexShader.replace(
       '#include <worldpos_vertex>',
       `
       #include <worldpos_vertex>
-      vWaterXZ = worldPosition.xz;
+      vec4 waterWorldPos = vec4( transformed, 1.0 );
+      #ifdef USE_BATCHING
+        waterWorldPos = batchingMatrix * waterWorldPos;
+      #endif
+      #ifdef USE_INSTANCING
+        waterWorldPos = instanceMatrix * waterWorldPos;
+      #endif
+      waterWorldPos = modelMatrix * waterWorldPos;
+      vWaterXZ = waterWorldPos.xz;
       `
     );
 
@@ -63,8 +72,8 @@ function createSharedWaterMaterial(): THREE.MeshStandardMaterial {
       // Flow toward -Z (south); sin(k*z + w*t) drifts south as t increases.
       float flowK = 4.85;
       float flowW = 1.35;
-      float southBands = sin(vWaterXZ.z * flowK + uTime * flowW);
-      float southDetail = sin(vWaterXZ.z * flowK * 2.7 + vWaterXZ.x * 1.4 + uTime * flowW * 0.92) * 0.28;
+      float southBands = sin(vWaterXZ.y * flowK + uTime * flowW);
+      float southDetail = sin(vWaterXZ.y * flowK * 2.7 + vWaterXZ.x * 1.4 + uTime * flowW * 0.92) * 0.28;
       float flowShade = southBands * 0.5 + southDetail + 0.52;
       diffuseColor.rgb *= mix(0.88, 1.1, flowShade);
       `

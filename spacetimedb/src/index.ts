@@ -1,5 +1,9 @@
 import { ScheduleAt } from 'spacetimedb';
-import { schema, table, t } from 'spacetimedb/server';
+import { schema, table, t, SenderError } from 'spacetimedb/server';
+import { affectedChunkKeys, applyTerrainStrokeToChunkMap } from './applyTerrainReducerEdit';
+import { TERRAIN_CHUNK_SEEDS } from './chunkSeeds';
+import { parseLevelChunkJson, serializeLevelChunk } from '../../shared/levelChunk';
+import { hashPassword, identitySpawnSeed } from './passwordHash';
 
 /** Keep in sync with `shared/levelChunk` CHUNK_SIZE × `shared/world` WORLD_CHUNK_COUNT_* */
 const TERRAIN_GRID_WIDTH = 64 * 3;
@@ -44,6 +48,19 @@ const Player = table(
   }
 );
 
+/** Private: password hashes are never replicated to clients. */
+const UserCredentials = table(
+  {
+    name: 'user_credentials',
+    indexes: [{ name: 'by_bound_owner', algorithm: 'btree', columns: ['boundOwner'] }],
+  },
+  {
+    username: t.string().primaryKey(),
+    passwordHash: t.string(),
+    boundOwner: t.identity(),
+  }
+);
+
 const TickJob = table(
   {
     name: 'tick_job',
@@ -69,6 +86,14 @@ const TerrainStroke = table(
   }
 );
 
+const TerrainChunk = table(
+  { name: 'terrain_chunk', public: true },
+  {
+    chunkKey: t.string().primaryKey(),
+    json: t.string(),
+  }
+);
+
 const HitSplat = table(
   { name: 'hit_splat', public: true },
   {
@@ -85,61 +110,198 @@ export const spacetimedb = schema(
   WorldState,
   IdGen,
   Player,
+  UserCredentials,
   TickJob,
   TerrainStroke,
+  TerrainChunk,
   HitSplat
 );
 
 spacetimedb.init((ctx) => {
   ctx.db.worldState.insert({ id: 0, tick: 0n });
   ctx.db.idGen.insert({ id: 0, nextPublicId: 1 });
+  for (const [chunkKey, json] of Object.entries(TERRAIN_CHUNK_SEEDS)) {
+    ctx.db.terrainChunk.insert({ chunkKey, json });
+  }
   ctx.db.tickJob.insert({
     scheduledId: 0n,
     scheduledAt: ScheduleAt.time(ctx.timestamp.microsSinceUnixEpoch + OSRS_TICK_MICROS),
   });
 });
 
-spacetimedb.clientConnected((ctx) => {
-  const existing = ctx.db.player.owner.find(ctx.sender);
-  if (existing) return;
+function normalizeUsername(raw: string): string {
+  return raw.trim().toLowerCase();
+}
 
+function validateCredentials(username: string, password: string): void {
+  if (username.length < 3 || username.length > 24) {
+    throw new SenderError('Username must be 3–24 characters after trimming.');
+  }
+  if (!/^[a-z0-9_]+$/.test(username)) {
+    throw new SenderError('Username may only contain a–z, 0–9, and underscores.');
+  }
+  if (password.length < 4 || password.length > 128) {
+    throw new SenderError('Password must be 4–128 characters.');
+  }
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function allocPublicId(ctx: any): number {
   const genRow = ctx.db.idGen.id.find(0);
-  if (!genRow) return;
+  if (!genRow) throw new SenderError('Server not initialized.');
   const publicId = genRow.nextPublicId;
   ctx.db.idGen.id.update({ ...genRow, nextPublicId: publicId + 1 });
+  return publicId;
+}
 
-  let tx: number;
-  let tz: number;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function collectOccupiedTiles(ctx: any): { tx: number; tz: number }[] {
   const positions: { tx: number; tz: number }[] = [];
   for (const p of ctx.db.player.iter()) {
     positions.push({ tx: p.tx, tz: p.tz });
   }
-  if (positions.length > 0) {
-    const anchor = positions[Math.floor(Math.random() * positions.length)]!;
-    const dtx = Math.floor(Math.random() * 5) - 2;
-    const dtz = Math.floor(Math.random() * 5) - 2;
-    const c = clampTile(anchor.tx + dtx, anchor.tz + dtz);
-    tx = c.tx;
-    tz = c.tz;
-  } else {
-    const hub = clampTile(5, 5);
-    tx = hub.tx;
-    tz = hub.tz;
-  }
+  return positions;
+}
 
+function spawnTilesForSeed(seed: number, positions: { tx: number; tz: number }[]): { tx: number; tz: number } {
+  if (positions.length > 0) {
+    const anchor = positions[seed % positions.length]!;
+    const dtx = (seed >>> 8) % 5;
+    const dtz = (seed >>> 16) % 5;
+    return clampTile(anchor.tx + dtx - 2, anchor.tz + dtz - 2);
+  }
+  return clampTile(5, 5);
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function ensurePlayerRow(ctx: any): void {
+  if (ctx.db.player.owner.find(ctx.sender)) return;
+  const seed = identitySpawnSeed(ctx.sender.toHexString());
+  const positions = collectOccupiedTiles(ctx);
+  const c = spawnTilesForSeed(seed, positions);
+  const publicId = allocPublicId(ctx);
   ctx.db.player.insert({
     owner: ctx.sender,
     publicId,
-    tx,
-    tz,
-    goalTx: tx,
-    goalTz: tz,
+    tx: c.tx,
+    tz: c.tz,
+    goalTx: c.tx,
+    goalTz: c.tz,
   });
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function credentialForSender(ctx: any): { username: string; passwordHash: string; boundOwner: { toHexString: () => string } } | undefined {
+  for (const row of ctx.db.userCredentials.by_bound_owner.filter(ctx.sender)) {
+    return row;
+  }
+  return undefined;
+}
+
+spacetimedb.clientConnected((ctx) => {
+  /* `init` only runs on brand-new databases; upgrades leave `terrain_chunk` empty until filled. */
+  for (const [chunkKey, json] of Object.entries(TERRAIN_CHUNK_SEEDS)) {
+    if (ctx.db.terrainChunk.chunkKey.find(chunkKey) === undefined) {
+      ctx.db.terrainChunk.insert({ chunkKey, json });
+    }
+  }
+  /* Returning client with a saved token: recreate `player` row after `clientDisconnected` cleared it. */
+  if (credentialForSender(ctx)) {
+    ensurePlayerRow(ctx);
+  }
 });
 
 spacetimedb.clientDisconnected((ctx) => {
   ctx.db.player.owner.delete(ctx.sender);
 });
+
+spacetimedb.reducer(
+  'register_account',
+  { username: t.string(), password: t.string() },
+  (ctx, { username, password }) => {
+    const u = normalizeUsername(username);
+    validateCredentials(u, password);
+    if (credentialForSender(ctx)) {
+      throw new SenderError('This session already has an account.');
+    }
+    if (ctx.db.userCredentials.username.find(u)) {
+      throw new SenderError('Username already taken.');
+    }
+    ctx.db.userCredentials.insert({
+      username: u,
+      passwordHash: hashPassword(u, password),
+      boundOwner: ctx.sender,
+    });
+    ensurePlayerRow(ctx);
+  }
+);
+
+spacetimedb.reducer(
+  'login_with_password',
+  { username: t.string(), password: t.string() },
+  (ctx, { username, password }) => {
+    const u = normalizeUsername(username);
+    validateCredentials(u, password);
+    const row = ctx.db.userCredentials.username.find(u);
+    if (!row) {
+      throw new SenderError('Unknown username.');
+    }
+    if (row.passwordHash !== hashPassword(u, password)) {
+      throw new SenderError('Incorrect password.');
+    }
+
+    const mine = credentialForSender(ctx);
+    if (mine !== undefined && mine.username !== u) {
+      throw new SenderError('This session already has a different account.');
+    }
+
+    if (row.boundOwner.toHexString() === ctx.sender.toHexString()) {
+      ensurePlayerRow(ctx);
+      return;
+    }
+
+    const oldPlayer = ctx.db.player.owner.find(row.boundOwner);
+    let publicId: number;
+    let tx: number;
+    let tz: number;
+    let goalTx: number;
+    let goalTz: number;
+    if (oldPlayer) {
+      publicId = oldPlayer.publicId;
+      tx = oldPlayer.tx;
+      tz = oldPlayer.tz;
+      goalTx = oldPlayer.goalTx;
+      goalTz = oldPlayer.goalTz;
+      ctx.db.player.owner.delete(row.boundOwner);
+    } else {
+      publicId = allocPublicId(ctx);
+      const seed = identitySpawnSeed(ctx.sender.toHexString());
+      const positions = collectOccupiedTiles(ctx);
+      const c = spawnTilesForSeed(seed, positions);
+      tx = c.tx;
+      tz = c.tz;
+      goalTx = c.tx;
+      goalTz = c.tz;
+    }
+
+    ctx.db.userCredentials.username.update({
+      ...row,
+      boundOwner: ctx.sender,
+    });
+
+    if (ctx.db.player.owner.find(ctx.sender)) {
+      return;
+    }
+    ctx.db.player.insert({
+      owner: ctx.sender,
+      publicId,
+      tx,
+      tz,
+      goalTx,
+      goalTz,
+    });
+  }
+);
 
 spacetimedb.reducer('run_server_tick', { arg: TickJob.rowType }, (ctx, { arg }) => {
   void arg;
@@ -227,5 +389,25 @@ spacetimedb.reducer(
       heightStep: step,
       brushRadius: brushR,
     });
+
+    const keys = affectedChunkKeys(tx, tz, brushR);
+    const chunkData = new Map();
+    for (const k of keys) {
+      const row = ctx.db.terrainChunk.chunkKey.find(k);
+      if (!row) continue;
+      chunkData.set(k, parseLevelChunkJson(row.json));
+    }
+    if (chunkData.size === 0) return;
+    const dirty = applyTerrainStrokeToChunkMap(chunkData, tx, tz, m, tex, step, brushR);
+    for (const k of dirty) {
+      const ch = chunkData.get(k);
+      if (!ch) continue;
+      const row = ctx.db.terrainChunk.chunkKey.find(k);
+      if (!row) continue;
+      ctx.db.terrainChunk.chunkKey.update({
+        chunkKey: k,
+        json: serializeLevelChunk(ch, false),
+      });
+    }
   }
 );

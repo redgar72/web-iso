@@ -5,10 +5,27 @@ import {
   tileIndexXZ64,
   type LevelChunkV1,
 } from './levelChunk';
+import { forEachUniqueTileInBrush } from './terrainBrush';
 import { WORLD_CHUNK_COUNT_X, WORLD_CHUNK_COUNT_Z } from './world';
 
 export function chunkKey(cx: number, cz: number): string {
   return `${cx},${cz}`;
+}
+
+/** Chunk map keys (`"cx,cz"`) intersected by a terrain brush in world tile space. */
+export function affectedChunkKeysForTerrainBrush(
+  centerTx: number,
+  centerTz: number,
+  brushRadius: number
+): string[] {
+  const keys = new Set<string>();
+  forEachUniqueTileInBrush(centerTx, centerTz, brushRadius, (gx, gz) => {
+    const cx = Math.floor(gx / CHUNK_SIZE);
+    const cz = Math.floor(gz / CHUNK_SIZE);
+    if (cx < 0 || cz < 0 || cx >= WORLD_CHUNK_COUNT_X || cz >= WORLD_CHUNK_COUNT_Z) return;
+    keys.add(chunkKey(cx, cz));
+  });
+  return [...keys];
 }
 
 /** @internal Exported for server + loader; matches chunk loader seam logic. */

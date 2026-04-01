@@ -1,4 +1,5 @@
 node_modules
 dist
+spacetimedb/src/chunkSeeds.ts
 *.local
 .DS_Store

@@ -65,6 +65,8 @@ export interface HUDState {
   runEnabled: boolean;
   runEnergy: number;
   runEnergyMax: number;
+  /** Logged-in account name (SpacetimeDB); null hides the label. */
+  accountUsername: string | null;
 }
 
 export interface HUDAPI {
@@ -93,12 +95,16 @@ export function createHUD(container: HTMLElement, config: HUDConfig): HUDAPI {
 
   const perfStack = document.createElement('div');
   perfStack.id = 'hud-perf';
+  const accountEl = document.createElement('div');
+  accountEl.id = 'hud-account';
+  accountEl.style.display = 'none';
   const fpsEl = document.createElement('div');
   fpsEl.id = 'fps';
   fpsEl.textContent = '— FPS';
   const latencyEl = document.createElement('div');
   latencyEl.id = 'latency';
   latencyEl.textContent = '— ms';
+  perfStack.appendChild(accountEl);
   perfStack.appendChild(fpsEl);
   perfStack.appendChild(latencyEl);
   container.appendChild(perfStack);
@@ -250,6 +256,14 @@ export function createHUD(container: HTMLElement, config: HUDConfig): HUDAPI {
 
   function update(state: HUDState): void {
     const { canvasWidth: cw, canvasHeight: ch, camera } = state;
+
+    const un = state.accountUsername;
+    if (un) {
+      accountEl.style.display = '';
+      accountEl.textContent = un;
+    } else {
+      accountEl.style.display = 'none';
+    }
 
     fpsEl.textContent = `${Math.round(state.smoothedFps)} FPS`;
     latencyEl.textContent =

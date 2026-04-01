@@ -205,6 +205,29 @@ export class ChunkTerrainLoader {
     return this.chunkData.get(chunkKey(cx, cz));
   }
 
+  /**
+   * Apply authoritative multiplayer terrain (SpacetimeDB `terrain_chunk` row).
+   * Rebuilds GPU meshes if the chunk is currently loaded.
+   */
+  ingestMultiplayerTerrainChunk(chunkKeyStr: string, json: string): void {
+    let chunk: LevelChunkV1;
+    try {
+      chunk = parseLevelChunkJson(json);
+    } catch (e) {
+      if (import.meta.env.DEV) {
+        console.warn('[terrain] ignored invalid chunk from server', chunkKeyStr, e);
+      }
+      return;
+    }
+    this.chunkData.set(chunkKeyStr, chunk);
+    const [sx, sz] = chunkKeyStr.split(',');
+    const cx = Number(sx);
+    const cz = Number(sz);
+    if (this.loaded.has(chunkKeyStr)) {
+      this.rebuildMesh(cx, cz);
+    }
+  }
+
   /** Global tile index; false if chunk not in session data or tile out of range. */
   tileHasWaterWorld(gtx: number, gtz: number): boolean {
     const cx = Math.floor(gtx / CHUNK_SIZE);

@@ -13,6 +13,12 @@ export interface MultiplayerHandlers {
   onSnap?: (msg: Extract<ServerMsg, { t: 'snap' }>) => void;
   onPeerHitSplat?: (msg: Extract<ServerMsg, { t: 'peerHitSplat' }>) => void;
   onTerrainEditFromPeer?: (msg: Extract<ServerMsg, { t: 'terrainEdit' }>) => void;
+  /** SpacetimeDB: full chunk JSON from `terrain_chunk` (authoritative over disk fetch). */
+  onTerrainChunkFromServer?: (chunkKey: string, json: string) => void;
+  /** SpacetimeDB: after the first subscription batch applied (DB snapshot in client cache). */
+  onSpacetimeSubscriptionApplied?: () => void;
+  /** SpacetimeDB: connection handshake failed (e.g. invalid token). */
+  onSpacetimeConnectError?: (message: string) => void;
 }
 
 export class MultiplayerClient {

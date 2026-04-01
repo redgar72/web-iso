@@ -45,7 +45,12 @@ export function applyGameOptions(renderer: THREE.WebGLRenderer, gameOptions: Gam
   renderer.setPixelRatio(getRendererPixelRatio(gameOptions));
   renderer.shadowMap.enabled = gameOptions.shadows;
   const perf = document.getElementById('hud-perf');
-  if (perf) perf.style.display = gameOptions.showPerfHud ? '' : 'none';
+  const fps = document.getElementById('fps');
+  const latency = document.getElementById('latency');
+  // Keep #hud-perf visible so the multiplayer name (#hud-account) still shows when FPS/latency are off.
+  if (perf) perf.style.display = 'flex';
+  if (fps) fps.style.display = gameOptions.showPerfHud ? '' : 'none';
+  if (latency) latency.style.display = gameOptions.showPerfHud ? '' : 'none';
   const tickBar = document.getElementById('hud-tick-bar');
   if (tickBar) tickBar.style.display = gameOptions.showTickBar ? '' : 'none';
   const enemyBars = document.getElementById('hud-enemy-health-bars');
