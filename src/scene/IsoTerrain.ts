@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 
-const TILE_SIZE = 2;
-const TILE_HALF = TILE_SIZE / 2;
+export const TILE_SIZE = 2;
+export const TILE_HALF = TILE_SIZE / 2;
 
 /**
  * GPU-friendly instanced grid for 2.5D isometric terrain.
@@ -31,8 +31,9 @@ export function createIsoTerrain(
   const matrix = new THREE.Matrix4();
   const position = new THREE.Vector3();
   let i = 0;
-  for (let z = 0; z < gridDepth; z++) {
-    for (let x = 0; x < gridWidth; x++) {
+  /** Instance index matches tileKey / chunk: `x * gridDepth + z`. */
+  for (let x = 0; x < gridWidth; x++) {
+    for (let z = 0; z < gridDepth; z++) {
       position.set(x * TILE_SIZE, 0, z * TILE_SIZE);
       matrix.setPosition(position);
       mesh.setMatrixAt(i, matrix);

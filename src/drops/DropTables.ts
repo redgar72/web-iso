@@ -4,7 +4,7 @@
 
 export type DropType = 'health' | 'mana' | 'coin' | null;
 
-export type MonsterType = 'redCube' | 'caster' | 'resurrector' | 'teleporter';
+export type MonsterType = 'redCube' | 'caster' | 'resurrector' | 'teleporter' | 'spider' | 'bear';
 
 interface DropEntry {
   chance: number;
@@ -37,17 +37,29 @@ const DROP_TABLES: Record<MonsterType, DropEntry[]> = {
     { chance: 0.26, drop: 'mana' },
     { chance: 0.14, drop: 'coin' },
   ],
+  spider: [
+    { chance: 0.55, drop: null },
+    { chance: 0.22, drop: 'coin' },
+    { chance: 0.12, drop: 'health' },
+    { chance: 0.11, drop: 'mana' },
+  ],
+  bear: [
+    { chance: 0.40, drop: null },
+    { chance: 0.20, drop: 'health' },
+    { chance: 0.22, drop: 'mana' },
+    { chance: 0.18, drop: 'coin' },
+  ],
 };
 
 /**
  * Rolls the drop table for the given monster type. Returns the drop type or null.
  */
 export function rollDrop(monsterType: MonsterType): DropType {
-  const table = DROP_TABLES[monsterType];
-  let r = Math.random();
-  for (const entry of table) {
-    r -= entry.chance;
-    if (r <= 0) return entry.drop;
+  const roll = Math.random();
+  let acc = 0;
+  for (const entry of DROP_TABLES[monsterType]) {
+    acc += entry.chance;
+    if (roll < acc) return entry.drop;
   }
   return null;
 }

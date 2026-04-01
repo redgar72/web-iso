@@ -1,9 +1,38 @@
 import * as THREE from 'three';
-import { IsoCamera } from './core/IsoCamera';
+import { FollowCamera } from './core/FollowCamera';
 import { GameLoop } from './core/GameLoop';
-import { createIsoTerrain } from './scene/IsoTerrain';
+import { TickClock } from './core/GameTick';
+import { TILE_SIZE } from './scene/IsoTerrain';
+import {
+  findTilePath,
+  tileCenterXZ,
+  worldXZToTile,
+  tileKey,
+  nextTileTowardGoal,
+  pickGreedyStepAway,
+  areOrthogonallyAdjacent,
+  findClosestReachableOrthAdjacentTile,
+  replaceTileNavExceptions,
+  findNearestOccupiableTile,
+  TERRAIN_GRID_DEPTH,
+  TERRAIN_GRID_WIDTH,
+  type GridTile,
+  type TileNavProfile,
+} from './world/TilePathfinding';
+import {
+  createGatheringNodesRoot,
+  GATHERING_NODE_DEFINITIONS,
+  gatheringTileNavExceptions,
+  gatheringExamineLine,
+  gatheringNodeIndexFromIntersection,
+  GATHERING_HARVEST_TICK_INTERVAL,
+  GATHERING_SUCCESS_CHANCE,
+  pickGatheringReward,
+} from './world/GatheringNodes';
 import { createIsoLights } from './scene/IsoLights';
-import { createEnemies, ENEMY_COUNT, ENEMY_SIZE, killEnemyInstance, resurrectEnemyInstance } from './scene/Enemies';
+import { buildTerrainFollowingGridGeometry } from './scene/terrainDebugGrid';
+import { buildWaterTileIndicatorGeometry } from './scene/waterTileIndicators';
+import { ENEMY_COUNT, ENEMY_SIZE, killEnemyInstance, resurrectEnemyInstance } from './scene/Enemies';
 import { rollDrop, type MonsterType, type DropType } from './drops/DropTables';
 import { createPlaceholderCharacter } from './character/loadFbxCharacter';
 import {
@@ -20,10 +49,22 @@ import {
   type SkillId,
   type AugmentId,
 } from './skills/SkillTree';
-import { createWaves } from './game/Waves';
+import { createWaves, FRESH_GRID_MODE } from './game/Waves';
 import { createEquipment } from './state/Equipment';
 import { createInventory, INVENTORY_SLOTS } from './state/Inventory';
-import { EQUIPMENT_SLOT_ORDER, getItemDef, type ItemId, type EquipmentSlotId } from './items/ItemTypes';
+import {
+  createPlayerSkills,
+  PLAYER_SKILL_SECTIONS,
+  PLAYER_SKILL_LABEL,
+  GATHERING_SUCCESS_SKILL_XP,
+} from './state/PlayerSkills';
+import {
+  EQUIPMENT_SLOT_ORDER,
+  getItemDef,
+  getExamineMessage,
+  type ItemId,
+  type EquipmentSlotId,
+} from './items/ItemTypes';
 import { createSword } from './combat/Sword';
 import { createFireballs, createRocks, createArrows } from './combat/Projectiles';
 import type { CombatState } from './combat/types';
@@ -53,26 +94,52 @@ import {
   BOSS_FIREBALL_BURN_DURATION,
   BOSS_FIREBALL_BURN_TICK_INTERVAL,
   BOSS_FIREBALL_BURN_DAMAGE_PER_SECOND,
+  TERRAIN_XZ_MIN,
+  TERRAIN_XZ_MAX,
 } from './config/Constants';
 import { createBoss, type BossApi } from './scene/Boss';
 import { createTeleporters, type TeleporterAPI } from './scene/Teleporters';
 import { createHUD, type HUDState } from './ui/HUD';
+import { createMinimap } from './ui/Minimap';
 import { createPlayerBurnVisuals } from './effects/BurnVisuals';
 import { createPlayerPoisonVisuals } from './effects/PoisonVisuals';
 import { createPoisonPools } from './effects/PoisonPools';
 import { createGroundItems } from './world/GroundItems';
+import { MultiplayerClient, type MultiplayerHandlers } from './net/MultiplayerClient';
+import { SpacetimeMultiplayerClient } from './net/SpacetimeMultiplayerClient';
+import { createRemotePlayers } from './scene/RemotePlayers';
+import {
+  loadGameOptions,
+  saveGameOptions,
+  getRendererPixelRatio,
+  applyGameOptions,
+  type GameOptionsState,
+} from './game/GameOptions';
+import { formatRunTime, getBestRunTimeSeconds, setBestRunTimeSeconds } from './game/RunRecord';
+import { createHitMarkerOverlay } from './ui/HitMarkers';
+import { PEN_RAT_COUNT, PEN_RAT_SIZE } from './scene/PenRats';
+import { STARTING_WILDLIFE_COUNT, wildlifeKindAt } from './scene/StartingAreaWildlife';
+import { createNpcSceneContent } from './scene/NpcSetup';
+import { penRatIndexFromIntersection, startingWildlifeIndexFromIntersection } from './scene/meshes';
+import { CHUNK_SIZE } from '../shared/levelChunk';
+import { ChunkTerrainLoader } from './world/chunkTerrainLoader';
+import { applyTerrainPaintAtTile } from './world/inGameTerrainPaint';
+import { createTerrainEditPanel } from './ui/TerrainEditPanel';
 
 const container = document.getElementById('app')!;
+
+let multiplayerClient: MultiplayerClient | SpacetimeMultiplayerClient | null = null;
 
 // Equipment & inventory (sword equipped by default; bow in inventory for testing)
 const equipment = createEquipment('sword');
 const inventory = createInventory(['bow']);
+const playerSkills = createPlayerSkills();
 let width = container.clientWidth;
 let height = container.clientHeight;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x1a1820);
-scene.fog = new THREE.Fog(0x1a1820, 35, 55);
+scene.fog = new THREE.Fog(0x1a1820, 55, 180);
 
 const renderer = new THREE.WebGLRenderer({
   antialias: true,
@@ -83,8 +150,10 @@ const renderer = new THREE.WebGLRenderer({
   preserveDrawingBuffer: true,
 });
 renderer.setSize(width, height);
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-renderer.shadowMap.enabled = false;
+
+let gameOptions = loadGameOptions();
+
+applyGameOptions(renderer, gameOptions);
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -118,21 +187,6 @@ canvas.addEventListener('webglcontextrestored', () => {
 });
 
 // Run timer (resets on respawn; best time persisted for competition). FPS/timer display in HUD.
-const BEST_TIME_KEY = 'web-iso-best-time';
-function formatTime(seconds: number): string {
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  return `${m}:${s.toString().padStart(2, '0')}`;
-}
-function getBestTime(): number {
-  const raw = localStorage.getItem(BEST_TIME_KEY);
-  if (raw == null) return 0;
-  const n = parseFloat(raw);
-  return Number.isFinite(n) ? n : 0;
-}
-function setBestTime(seconds: number): void {
-  localStorage.setItem(BEST_TIME_KEY, String(seconds));
-}
 let runTime = 0;
 
 // Health & Mana bars (DOM moved to HUD; state stays here)
@@ -157,6 +211,9 @@ function getMaxHealth(): number {
 let level = 1;
 let xp = 0;
 const XP_RED_CUBE = 12;
+const XP_PEN_RAT = 5;
+const XP_SPIDER = 4;
+const XP_BEAR = 11;
 const XP_CASTER = 35;
 const XP_RESURRECTOR = 40;
 
@@ -166,13 +223,7 @@ function getXpForNextLevel(): number {
 
 let health = getMaxHealth();
 
-// Equipment panel (equipped items - always visible). Inserted into HUD bars root after HUD creation.
-const equipmentPanelEl = document.createElement('div');
-equipmentPanelEl.style.cssText = 'display:flex;flex-direction:column;gap:6px;margin-bottom:12px;';
-const equipmentLabelEl = document.createElement('div');
-equipmentLabelEl.style.cssText = 'font:11px sans-serif;color:rgba(255,255,255,0.85);';
-equipmentLabelEl.textContent = 'Equipment';
-equipmentPanelEl.appendChild(equipmentLabelEl);
+/** Equipment slots — mounted under the Equipment tab of the game menu panel (I). */
 const equipmentSlotsEl = document.createElement('div');
 equipmentSlotsEl.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;';
 const SLOT_SIZE = 44;
@@ -203,10 +254,6 @@ function renderEquipmentPanel(): void {
     equipmentSlotsEl.appendChild(slotDiv);
   }
 }
-equipment.subscribe(renderEquipmentPanel);
-renderEquipmentPanel();
-equipmentPanelEl.appendChild(equipmentSlotsEl);
-// Wave display and bars root come from HUD; equipment panel is inserted there after createHUD()
 
 // Prayer system (RuneScape-style)
 type PrayerType = 'melee' | 'mage' | 'range' | null;
@@ -307,7 +354,8 @@ function updateStatsDisplay(): void {
 // barsEl replaced by HUD; equipment panel inserted into HUD after createHUD()
 
 // Game over state & overlay
-const SPAWN_POSITION = new THREE.Vector3(10, 0, 10);
+/** Tile centers align with IsoTerrain instancing. */
+const SPAWN_POSITION = new THREE.Vector3(5 * TILE_SIZE + TILE_SIZE / 2, 0, 5 * TILE_SIZE + TILE_SIZE / 2);
 let isDead = false;
 
 const gameOverEl = document.createElement('div');
@@ -339,11 +387,11 @@ container.appendChild(gameOverEl);
 
 function showGameOver(): void {
   isDead = true;
-  const best = getBestTime();
+  const best = getBestRunTimeSeconds();
   const isNewBest = runTime > best;
-  if (isNewBest) setBestTime(runTime);
-  gameOverTimeEl.textContent = `Time: ${formatTime(runTime)}`;
-  gameOverBestEl.textContent = isNewBest ? `New best! ${formatTime(runTime)}` : `Best: ${formatTime(best)}`;
+  if (isNewBest) setBestRunTimeSeconds(runTime);
+  gameOverTimeEl.textContent = `Time: ${formatRunTime(runTime)}`;
+  gameOverBestEl.textContent = isNewBest ? `New best! ${formatRunTime(runTime)}` : `Best: ${formatRunTime(best)}`;
   gameOverEl.style.display = 'flex';
 }
 
@@ -354,12 +402,20 @@ function respawn(): void {
   setHealth(getMaxHealth());
   setMana(MAX_MANA);
   character.position.copy(SPAWN_POSITION);
-  moveTarget = null;
+  snapCharacterToWalkableGround();
+  clearTileMovement();
+  trainingDummyAlive = true;
+  trainingDummyHealth = MAX_TRAINING_DUMMY_HP;
+  trainingDummyGroup.visible = true;
+  trainingDummyMeleeTickCounter = -1;
+  pendingTrainingDummyMeleeSwings = 0;
   playerBurning = false; // Clear burning on respawn
   playerPoisoned = false; // Clear poison on respawn
   activePrayer = null; // Clear prayer on respawn
   updatePrayerButtons();
   waves.startWave(1);
+  playerRunEnergy = RUN_ENERGY_MAX;
+  playerRunEnabled = true;
 }
 
 respawnBtn.addEventListener('click', respawn);
@@ -576,58 +632,221 @@ skillTreeEl.addEventListener('click', (e) => {
   if (e.target === skillTreeEl) setSkillTreeOpen(false);
 });
 
-// Inventory popup (I to open/close) — floating window, game keeps running
-const inventoryEl = document.createElement('div');
-inventoryEl.id = 'inventory';
-inventoryEl.style.cssText =
+function makeOptionsSectionTitle(text: string): HTMLDivElement {
+  const el = document.createElement('div');
+  el.textContent = text;
+  el.style.cssText =
+    'font:11px sans-serif;color:rgba(255,220,160,0.85);text-transform:uppercase;letter-spacing:0.06em;margin:14px 0 6px;';
+  return el;
+}
+
+function makeOptionsCheckbox(label: string, key: keyof GameOptionsState): HTMLElement {
+  const row = document.createElement('label');
+  row.style.cssText =
+    'display:flex;align-items:flex-start;gap:8px;font:12px sans-serif;color:#e0dce8;cursor:pointer;user-select:none;line-height:1.35;';
+  const input = document.createElement('input');
+  input.type = 'checkbox';
+  input.checked = gameOptions[key];
+  input.addEventListener('change', () => {
+    gameOptions[key] = input.checked;
+    saveGameOptions(gameOptions);
+    applyGameOptions(renderer, gameOptions);
+  });
+  const span = document.createElement('span');
+  span.textContent = label;
+  row.appendChild(input);
+  row.appendChild(span);
+  return row;
+}
+
+// Game menu panel (I): icon tabs — Inventory, Equipment, Skills, Options
+const gameMenuEl = document.createElement('div');
+gameMenuEl.id = 'game-menu-panel';
+gameMenuEl.style.cssText =
   'position:absolute;top:12px;right:12px;z-index:18;display:none;flex-direction:column;';
-const inventoryPanel = document.createElement('div');
-inventoryPanel.style.cssText =
-  'background:linear-gradient(180deg,#2a2630 0%,#1e1a24 100%);border:2px solid rgba(255,255,255,0.2);border-radius:12px;padding:24px;min-width:200px;box-shadow:0 8px 32px rgba(0,0,0,0.5);';
-const inventoryTitle = document.createElement('div');
-inventoryTitle.textContent = 'Inventory';
-inventoryTitle.style.cssText = 'font:20px sans-serif;color:#e8e0e0;font-weight:bold;margin-bottom:12px;';
-const inventoryEquipmentRow = document.createElement('div');
-inventoryEquipmentRow.style.cssText = 'display:flex;align-items:center;gap:12px;margin-bottom:16px;';
-const inventoryEquipmentLabel = document.createElement('div');
-inventoryEquipmentLabel.style.cssText = 'font:12px sans-serif;color:rgba(255,255,255,0.8);min-width:56px;';
-inventoryEquipmentLabel.textContent = 'Equipped';
-inventoryEquipmentRow.appendChild(inventoryEquipmentLabel);
-const inventoryEquipmentSlots = document.createElement('div');
-inventoryEquipmentSlots.style.cssText = 'display:flex;gap:8px;';
+const gameMenuShell = document.createElement('div');
+gameMenuShell.style.cssText =
+  'background:linear-gradient(180deg,#2a2630 0%,#1e1a24 100%);border:2px solid rgba(255,255,255,0.2);border-radius:12px;padding:16px 18px 18px;min-width:280px;max-width:min(360px,92vw);box-shadow:0 8px 32px rgba(0,0,0,0.5);';
+
+const tabBar = document.createElement('div');
+tabBar.style.cssText =
+  'display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px;border-bottom:1px solid rgba(255,255,255,0.12);padding-bottom:12px;';
+const tabBtnBase =
+  'width:44px;height:44px;border-radius:10px;border:2px solid transparent;background:rgba(0,0,0,0.35);cursor:pointer;display:flex;align-items:center;justify-content:center;color:#ece8e0;flex-shrink:0;transition:background 0.15s,border-color 0.15s,opacity 0.18s;padding:0;';
+
+const tabInventoryBtn = document.createElement('button');
+tabInventoryBtn.type = 'button';
+tabInventoryBtn.title = 'Inventory';
+tabInventoryBtn.style.cssText = tabBtnBase;
+tabInventoryBtn.innerHTML =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8h12v12a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V8z"/><path d="M9 8V6a3 3 0 0 1 3-3h0a3 3 0 0 1 3 3v2"/></svg>';
+
+const tabEquipmentBtn = document.createElement('button');
+tabEquipmentBtn.type = 'button';
+tabEquipmentBtn.title = 'Equipment';
+tabEquipmentBtn.style.cssText = tabBtnBase;
+tabEquipmentBtn.innerHTML =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l8 4v5.5c0 3.5-2.5 6.8-8 8.5-5.5-1.7-8-5-8-8.5V6l8-4z"/><path d="M12 11v6"/></svg>';
+
+const tabSkillsBtn = document.createElement('button');
+tabSkillsBtn.type = 'button';
+tabSkillsBtn.title = 'Skills';
+tabSkillsBtn.style.cssText = tabBtnBase;
+tabSkillsBtn.innerHTML =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>';
+
+const tabOptionsBtn = document.createElement('button');
+tabOptionsBtn.type = 'button';
+tabOptionsBtn.title = 'Options';
+tabOptionsBtn.style.cssText = tabBtnBase;
+tabOptionsBtn.innerHTML =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>';
+
+tabBar.appendChild(tabInventoryBtn);
+tabBar.appendChild(tabEquipmentBtn);
+tabBar.appendChild(tabSkillsBtn);
+tabBar.appendChild(tabOptionsBtn);
+
+const tabContentWrap = document.createElement('div');
+
+const inventoryTabPane = document.createElement('div');
+inventoryTabPane.style.cssText = 'display:flex;flex-direction:column;gap:10px;';
 const inventoryGridEl = document.createElement('div');
 inventoryGridEl.style.cssText = 'display:grid;gap:6px;';
+
+const equipmentTabPane = document.createElement('div');
+equipmentTabPane.style.cssText = 'display:none;flex-direction:column;gap:10px;';
+const equipmentTabHint = document.createElement('div');
+equipmentTabHint.textContent =
+  'Equipped items — click one to send it to the first free inventory slot.';
+equipmentTabHint.style.cssText = 'font:11px sans-serif;color:rgba(255,255,255,0.55);line-height:1.35;';
+equipmentTabPane.appendChild(equipmentTabHint);
+equipmentTabPane.appendChild(equipmentSlotsEl);
+
+const skillsTabPane = document.createElement('div');
+skillsTabPane.style.cssText =
+  'display:none;flex-direction:column;gap:12px;max-height:min(440px,58vh);overflow-y:auto;padding-right:4px;';
+const skillsIntro = document.createElement('div');
+skillsIntro.textContent =
+  'Combat and gathering skills. Successful mining, forestry, and fishing attempts grant XP when you receive a resource.';
+skillsIntro.style.cssText = 'font:11px sans-serif;color:rgba(255,255,255,0.55);line-height:1.35;';
+skillsTabPane.appendChild(skillsIntro);
+const skillsListMount = document.createElement('div');
+skillsListMount.style.cssText = 'display:flex;flex-direction:column;gap:14px;';
+skillsTabPane.appendChild(skillsListMount);
+
+const optionsTabPane = document.createElement('div');
+optionsTabPane.style.cssText = 'display:none;flex-direction:column;gap:4px;';
+const optionsIntro = document.createElement('div');
+optionsIntro.textContent = 'Display and debugging. Settings are saved in this browser.';
+optionsIntro.style.cssText = 'font:11px sans-serif;color:rgba(255,255,255,0.5);line-height:1.35;margin-bottom:6px;';
+optionsTabPane.appendChild(optionsIntro);
+
+const displayTitle = makeOptionsSectionTitle('Display');
+displayTitle.style.marginTop = '2px';
+optionsTabPane.appendChild(displayTitle);
+optionsTabPane.appendChild(
+  makeOptionsCheckbox('Cap pixel ratio at 1× (sharper UI text, less GPU fill on high-DPI screens)', 'pixelRatio1')
+);
+optionsTabPane.appendChild(makeOptionsCheckbox('Enable renderer shadow maps (experimental; few lights cast shadows)', 'shadows'));
+optionsTabPane.appendChild(makeOptionsCheckbox('Show FPS and latency (top-left)', 'showPerfHud'));
+optionsTabPane.appendChild(makeOptionsCheckbox('Show overhead enemy and boss health bars', 'showEnemyHealthBars'));
+optionsTabPane.appendChild(makeOptionsCheckbox('Show game tick progress bar (top center)', 'showTickBar'));
+
+optionsTabPane.appendChild(makeOptionsSectionTitle('Debug'));
+const debugHint = document.createElement('div');
+debugHint.textContent =
+  'Buttons log or tweak local state. Open the browser console (F12) to read snapshots.';
+debugHint.style.cssText = 'font:10px sans-serif;color:rgba(255,255,255,0.45);line-height:1.4;';
+optionsTabPane.appendChild(debugHint);
+
+const debugBtnStyle =
+  'align-self:flex-start;padding:8px 12px;font:12px sans-serif;border-radius:8px;cursor:pointer;margin-top:8px;' +
+  'border:1px solid rgba(255,255,255,0.22);background:rgba(35,32,44,0.95);color:#e8e4ec;transition:background 0.12s;';
+
+const snapshotBtn = document.createElement('button');
+snapshotBtn.type = 'button';
+snapshotBtn.id = 'options-debug-snapshot';
+snapshotBtn.textContent = 'Print debug snapshot';
+snapshotBtn.style.cssText = debugBtnStyle;
+snapshotBtn.addEventListener('mouseenter', () => {
+  snapshotBtn.style.background = 'rgba(50,46,62,0.98)';
+});
+snapshotBtn.addEventListener('mouseleave', () => {
+  snapshotBtn.style.background = 'rgba(35,32,44,0.95)';
+});
+optionsTabPane.appendChild(snapshotBtn);
+
+const fillVitalsBtn = document.createElement('button');
+fillVitalsBtn.type = 'button';
+fillVitalsBtn.id = 'options-debug-fill-vitals';
+fillVitalsBtn.textContent = 'Fill health, mana & run energy';
+fillVitalsBtn.style.cssText = debugBtnStyle;
+fillVitalsBtn.addEventListener('mouseenter', () => {
+  fillVitalsBtn.style.background = 'rgba(50,46,62,0.98)';
+});
+fillVitalsBtn.addEventListener('mouseleave', () => {
+  fillVitalsBtn.style.background = 'rgba(35,32,44,0.95)';
+});
+optionsTabPane.appendChild(fillVitalsBtn);
+
+const buildNote = document.createElement('div');
+buildNote.style.cssText = 'font:10px sans-serif;color:rgba(255,255,255,0.38);margin-top:10px;line-height:1.35;';
+buildNote.textContent = `Build: FRESH_GRID_MODE = ${FRESH_GRID_MODE} (wave progression only when false)`;
+optionsTabPane.appendChild(buildNote);
+
+inventoryTabPane.appendChild(inventoryGridEl);
+const inventoryHint = document.createElement('div');
+inventoryHint.textContent =
+  'Left-click sword or bow to equip; right-click for Examine, Equip (sword/bow), Use (other items), and Drop. Press I to close.';
+inventoryHint.style.cssText = 'font:11px sans-serif;color:rgba(255,255,255,0.5);margin-top:4px;line-height:1.35;';
+inventoryTabPane.appendChild(inventoryHint);
+
+tabContentWrap.appendChild(inventoryTabPane);
+tabContentWrap.appendChild(equipmentTabPane);
+tabContentWrap.appendChild(skillsTabPane);
+tabContentWrap.appendChild(optionsTabPane);
+
+gameMenuShell.appendChild(tabBar);
+gameMenuShell.appendChild(tabContentWrap);
+gameMenuEl.appendChild(gameMenuShell);
+container.appendChild(gameMenuEl);
+
+type GameMenuTabId = 'inventory' | 'equipment' | 'skills' | 'options';
+
+const gameMenuTabs: { id: GameMenuTabId; btn: HTMLButtonElement; pane: HTMLElement }[] = [
+  { id: 'inventory', btn: tabInventoryBtn, pane: inventoryTabPane },
+  { id: 'equipment', btn: tabEquipmentBtn, pane: equipmentTabPane },
+  { id: 'skills', btn: tabSkillsBtn, pane: skillsTabPane },
+  { id: 'options', btn: tabOptionsBtn, pane: optionsTabPane },
+];
+
+let gameMenuActiveTab: GameMenuTabId = 'inventory';
+
+function updateGameMenuTabStyle(): void {
+  for (const { id, btn, pane } of gameMenuTabs) {
+    const on = gameMenuActiveTab === id;
+    pane.style.display = on ? 'flex' : 'none';
+    btn.style.opacity = on ? '1' : '0.5';
+    btn.style.borderColor = on ? 'rgba(130,175,255,0.55)' : 'transparent';
+    btn.style.background = on ? 'rgba(45,75,130,0.5)' : 'rgba(0,0,0,0.35)';
+  }
+}
+
+function setGameMenuTab(id: GameMenuTabId): void {
+  gameMenuActiveTab = id;
+  updateGameMenuTabStyle();
+}
+
+tabInventoryBtn.addEventListener('click', () => setGameMenuTab('inventory'));
+tabEquipmentBtn.addEventListener('click', () => setGameMenuTab('equipment'));
+tabSkillsBtn.addEventListener('click', () => setGameMenuTab('skills'));
+tabOptionsBtn.addEventListener('click', () => setGameMenuTab('options'));
+
 const INV_SLOT_SIZE = 40;
 const invSlotStyle = `width:${INV_SLOT_SIZE}px;height:${INV_SLOT_SIZE}px;background:rgba(0,0,0,0.5);border:2px solid rgba(255,255,255,0.2);border-radius:6px;display:flex;align-items:center;justify-content:center;font:10px sans-serif;color:rgba(255,255,255,0.9);cursor:pointer;transition:border-color 0.15s,background 0.15s;box-sizing:border-box;`;
-const inventoryHint = document.createElement('div');
-inventoryHint.textContent = 'Press I to close';
-inventoryHint.style.cssText = 'font:11px sans-serif;color:rgba(255,255,255,0.5);margin-top:12px;';
 
-function renderInventoryModal(): void {
-  inventoryEquipmentSlots.innerHTML = '';
-  for (const slotId of EQUIPMENT_SLOT_ORDER) {
-    const slotDiv = document.createElement('div');
-    slotDiv.title = slotId === 'weapon' ? 'Weapon' : slotId;
-    slotDiv.style.cssText = invSlotStyle;
-    const itemId = equipment.getEquipped(slotId);
-    if (itemId) {
-      const def = getItemDef(itemId);
-      slotDiv.textContent = def.label;
-      slotDiv.style.background = 'rgba(60,80,120,0.5)';
-      slotDiv.style.borderColor = 'rgba(255,255,255,0.4)';
-      slotDiv.addEventListener('click', () => {
-        const firstEmpty = inventory.findFirstEmpty();
-        if (firstEmpty >= 0) {
-          equipment.setEquipped(slotId, null);
-          inventory.setSlot(firstEmpty, { itemId, count: 1 });
-        }
-      });
-    } else {
-      slotDiv.textContent = slotId === 'weapon' ? '—' : '—';
-      slotDiv.style.color = 'rgba(255,255,255,0.4)';
-    }
-    inventoryEquipmentSlots.appendChild(slotDiv);
-  }
+function renderInventoryGrid(): void {
   inventoryGridEl.innerHTML = '';
   inventoryGridEl.style.gridTemplateColumns = `repeat(${inventory.getColumns()}, ${INV_SLOT_SIZE}px)`;
   for (let i = 0; i < INVENTORY_SLOTS; i++) {
@@ -646,6 +865,11 @@ function renderInventoryModal(): void {
           inventory.setSlot(i, current ? { itemId: current, count: 1 } : null);
         }
       });
+      cell.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        openInventorySlotContextMenu(e.clientX, e.clientY, i);
+      });
     } else {
       cell.style.color = 'rgba(255,255,255,0.3)';
       cell.textContent = '';
@@ -653,22 +877,70 @@ function renderInventoryModal(): void {
     inventoryGridEl.appendChild(cell);
   }
 }
-equipment.subscribe(renderInventoryModal);
-inventory.subscribe(renderInventoryModal);
 
-inventoryPanel.appendChild(inventoryTitle);
-inventoryEquipmentRow.appendChild(inventoryEquipmentSlots);
-inventoryPanel.appendChild(inventoryEquipmentRow);
-inventoryPanel.appendChild(inventoryGridEl);
-inventoryPanel.appendChild(inventoryHint);
-inventoryEl.appendChild(inventoryPanel);
-container.appendChild(inventoryEl);
+function renderSkillsPanel(): void {
+  skillsListMount.replaceChildren();
+  for (const section of PLAYER_SKILL_SECTIONS) {
+    const sec = document.createElement('div');
+    const st = document.createElement('div');
+    st.textContent = section.title;
+    st.style.cssText =
+      'font:11px sans-serif;font-weight:bold;color:rgba(180,195,220,0.95);letter-spacing:0.06em;text-transform:uppercase;margin-bottom:2px;';
+    sec.appendChild(st);
+    for (const sid of section.skills) {
+      const prog = playerSkills.getXpProgress(sid);
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;flex-direction:column;gap:4px;margin-bottom:2px;';
+      const head = document.createElement('div');
+      head.style.cssText = 'display:flex;justify-content:space-between;align-items:baseline;gap:12px;';
+      const name = document.createElement('span');
+      name.textContent = PLAYER_SKILL_LABEL[sid];
+      name.style.cssText = 'font:13px sans-serif;color:#ece8e0;';
+      const lvl = document.createElement('span');
+      lvl.textContent = `Level ${prog.level}`;
+      lvl.style.cssText = 'font:12px sans-serif;color:#9ec8b0;font-weight:bold;';
+      head.appendChild(name);
+      head.appendChild(lvl);
+      row.appendChild(head);
+      const barWrap = document.createElement('div');
+      barWrap.style.cssText =
+        'height:6px;border-radius:3px;background:rgba(0,0,0,0.45);overflow:hidden;border:1px solid rgba(255,255,255,0.08);';
+      const fill = document.createElement('div');
+      const pct = prog.atMax ? 100 : (100 * prog.intoLevel) / prog.requiredForNext;
+      fill.style.cssText = `height:100%;width:${pct}%;background:linear-gradient(90deg,#4a7a9c,#6ab090);border-radius:2px;transition:width 0.2s;`;
+      barWrap.appendChild(fill);
+      row.appendChild(barWrap);
+      const hint = document.createElement('div');
+      hint.style.cssText = 'font:10px sans-serif;color:rgba(255,255,255,0.42);';
+      const total = playerSkills.getTotalXp(sid);
+      hint.textContent = prog.atMax
+        ? `Max level · ${total} XP`
+        : `${prog.intoLevel} / ${prog.requiredForNext} XP this level · ${total} total`;
+      row.appendChild(hint);
+      sec.appendChild(row);
+    }
+    skillsListMount.appendChild(sec);
+  }
+}
 
-let inventoryOpen = false;
-function setInventoryOpen(open: boolean): void {
-  inventoryOpen = open;
-  inventoryEl.style.display = open ? 'flex' : 'none';
-  if (open) renderInventoryModal();
+function refreshGameMenuLists(): void {
+  renderEquipmentPanel();
+  renderInventoryGrid();
+  renderSkillsPanel();
+}
+
+equipment.subscribe(refreshGameMenuLists);
+inventory.subscribe(renderInventoryGrid);
+playerSkills.subscribe(renderSkillsPanel);
+
+updateGameMenuTabStyle();
+refreshGameMenuLists();
+
+let gameMenuOpen = false;
+function setGameMenuOpen(open: boolean): void {
+  gameMenuOpen = open;
+  gameMenuEl.style.display = open ? 'flex' : 'none';
+  if (open) refreshGameMenuLists();
 }
 
 levelUpNotifier.callback = () => {
@@ -683,90 +955,7 @@ function setPaused(paused: boolean): void {
 
 // Enemy health bars moved to HUD (createHUD below)
 
-// Floating combat hit markers
-const hitMarkersContainer = document.createElement('div');
-hitMarkersContainer.style.cssText = 'position:absolute;inset:0;z-index:5;pointer-events:none;';
-container.appendChild(hitMarkersContainer);
-
-interface HitMarker {
-  element: HTMLDivElement;
-  worldPosition: THREE.Vector3;
-  spawnTime: number; // actual time in seconds
-  amount: number;
-  offsetY: number; // Current vertical offset for floating animation
-}
-
-const hitMarkers: HitMarker[] = [];
-const HIT_MARKER_DURATION = 1.0; // seconds
-const HIT_MARKER_FLOAT_DISTANCE = 1.5; // world units
-const HIT_MARKER_Y_OFFSET = 1.5; // base offset above entity
-const hitMarkerProjectionVec = new THREE.Vector3();
-
-function createHitMarker(position: THREE.Vector3, amount: number): void {
-  const element = document.createElement('div');
-  element.textContent = Math.round(amount).toString();
-  element.style.cssText = `
-    position: absolute;
-    font: bold 20px/1 sans-serif;
-    color: #ff4444;
-    text-shadow: 0 0 8px rgba(255, 68, 68, 0.8), 0 2px 4px rgba(0, 0, 0, 0.8);
-    white-space: nowrap;
-    pointer-events: none;
-    transform: translate(-50%, -50%);
-    will-change: transform, opacity;
-  `;
-  hitMarkersContainer.appendChild(element);
-
-  hitMarkers.push({
-    element,
-    worldPosition: position.clone(),
-    spawnTime: performance.now() / 1000, // Use actual time for smooth animation
-    amount,
-    offsetY: 0,
-  });
-}
-
-function updateHitMarkers(currentTime: number, camera: THREE.Camera, cw: number, ch: number): void {
-  for (let i = hitMarkers.length - 1; i >= 0; i--) {
-    const marker = hitMarkers[i];
-    const age = currentTime - marker.spawnTime;
-    
-    if (age >= HIT_MARKER_DURATION) {
-      // Remove expired marker
-      hitMarkersContainer.removeChild(marker.element);
-      hitMarkers.splice(i, 1);
-      continue;
-    }
-
-    // Update floating animation
-    const progress = age / HIT_MARKER_DURATION;
-    marker.offsetY = HIT_MARKER_FLOAT_DISTANCE * progress;
-    
-    // Fade out
-    const opacity = 1.0 - progress;
-    marker.element.style.opacity = opacity.toString();
-
-    // Project 3D position to screen space
-    hitMarkerProjectionVec.set(
-      marker.worldPosition.x,
-      marker.worldPosition.y + HIT_MARKER_Y_OFFSET + marker.offsetY,
-      marker.worldPosition.z
-    );
-    hitMarkerProjectionVec.project(camera);
-    
-    const px = (hitMarkerProjectionVec.x * 0.5 + 0.5) * cw;
-    const py = (1 - (hitMarkerProjectionVec.y * 0.5 + 0.5)) * ch;
-    
-    // Only show if in front of camera
-    if (hitMarkerProjectionVec.z < 1) {
-      marker.element.style.left = `${px}px`;
-      marker.element.style.top = `${py}px`;
-      marker.element.style.visibility = 'visible';
-    } else {
-      marker.element.style.visibility = 'hidden';
-    }
-  }
-}
+const hitMarkers = createHitMarkerOverlay(container, { getMultiplayerClient: () => multiplayerClient });
 
 function setHealth(value: number): void {
   const max = getMaxHealth();
@@ -776,7 +965,7 @@ function setHealth(value: number): void {
   // Show hit marker if player took damage
   if (health < oldHealth && oldHealth > 0) {
     const damage = oldHealth - health;
-    createHitMarker(character.position, damage);
+    hitMarkers.createHitMarker(character.position, damage);
   }
   
   if (health <= 0) showGameOver();
@@ -804,21 +993,362 @@ function addXp(amount: number): void {
 function setMana(value: number): void {
   mana = Math.max(0, Math.min(MAX_MANA, value));
 }
-const isoCamera = new IsoCamera(width, height);
-isoCamera.setWorldFocus(10, 0, 10);
-isoCamera.setZoom(1.2);
-isoCamera.setDistance(28);
+const terrainGridTiles = TERRAIN_GRID_WIDTH;
+const terrainWorldSize = terrainGridTiles * TILE_SIZE;
 
-const terrain = createIsoTerrain(24, 24, { color: 0x5a5668 });
-scene.add(terrain);
+const followCamera = new FollowCamera(width, height);
+followCamera.setDistance(16);
+followCamera.setTarget(SPAWN_POSITION.x, SPAWN_POSITION.y, SPAWN_POSITION.z);
 
-const enemies = createEnemies();
+/** WASD camera (held keys); A/D orbit, W/S pitch — Runescape-style. */
+const cameraKeysHeld = new Set<string>();
+let middleMouseCameraDrag = false;
+let middleCameraLastX = 0;
+let middleCameraLastY = 0;
+/** Radians per pixel — tuned to feel close to holding A/D or W/S. */
+const CAM_MIDDLE_DRAG_ORBIT = 0.0055;
+const CAM_MIDDLE_DRAG_PITCH = 0.0045;
+
+function registerCameraKeyListeners(): void {
+  const norm = (k: string): string => (k.length === 1 ? k.toLowerCase() : k);
+  window.addEventListener('keydown', (e) => {
+    const k = norm(e.key);
+    if (k !== 'w' && k !== 'a' && k !== 's' && k !== 'd') return;
+    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+    e.preventDefault();
+    cameraKeysHeld.add(k);
+  });
+  window.addEventListener('keyup', (e) => {
+    cameraKeysHeld.delete(norm(e.key));
+  });
+  window.addEventListener('blur', () => {
+    cameraKeysHeld.clear();
+    middleMouseCameraDrag = false;
+  });
+}
+registerCameraKeyListeners();
+
+function registerMiddleMouseCameraDrag(): void {
+  container.addEventListener('mousedown', (e) => {
+    if (e.button !== 1) return;
+    if (isPaused || isDead) return;
+    if (skillTreeOpen || gameMenuOpen) return;
+    const t = e.target as HTMLElement;
+    if (t.closest('[data-web-iso="minimap"]')) return;
+    if (t.closest('[data-web-iso="terrain-edit"]')) return;
+    if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement) return;
+    e.preventDefault();
+    middleMouseCameraDrag = true;
+    middleCameraLastX = e.clientX;
+    middleCameraLastY = e.clientY;
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!middleMouseCameraDrag) return;
+    if (isPaused || skillTreeOpen || gameMenuOpen) {
+      middleMouseCameraDrag = false;
+      return;
+    }
+    const dx = e.clientX - middleCameraLastX;
+    const dy = e.clientY - middleCameraLastY;
+    middleCameraLastX = e.clientX;
+    middleCameraLastY = e.clientY;
+    followCamera.addOrbitYaw(-dx * CAM_MIDDLE_DRAG_ORBIT);
+    followCamera.addPitch(dy * CAM_MIDDLE_DRAG_PITCH);
+  });
+  window.addEventListener('mouseup', (e) => {
+    if (e.button === 1) middleMouseCameraDrag = false;
+  });
+}
+registerMiddleMouseCameraDrag();
+
+/** World zoom — must live on `clickOverlay`: it sits above the canvas and receives wheel here. */
+clickOverlay.addEventListener(
+  'wheel',
+  (e) => {
+    if (isPaused || isDead) return;
+    if (skillTreeOpen || gameMenuOpen) return;
+    if ((e.target as HTMLElement).closest('[data-web-iso="terrain-edit"]')) return;
+    e.preventDefault();
+    const modeScale = e.deltaMode === 1 ? 24 : e.deltaMode === 2 ? 100 : 1;
+    const dy = e.deltaY * modeScale;
+    const step = Math.sign(dy) * Math.min(Math.max(Math.abs(dy) * 0.012, 0.35), 3.2);
+    followCamera.addDistanceDelta(step);
+  },
+  { passive: false }
+);
+
+let devTerrainGrid: THREE.LineSegments | null = null;
+let devTerrainGridRaf = 0;
+/** Terrain editor: rebuilt when chunks change; assigned after {@link terrainEditPanel} exists. */
+let refreshWaterTileIndicators: () => void = () => {};
+let waterTileIndicatorMesh: THREE.Mesh | null = null;
+let waterTileIndicatorsRaf = 0;
+const WATER_TILE_INDICATOR_Y_BIAS = 0.055;
+const DEV_TERRAIN_GRID_Y_BIAS = 0.045;
+function refreshDevTerrainGrid(): void {
+  if (!import.meta.env.DEV) return;
+  if (devTerrainGridRaf !== 0) cancelAnimationFrame(devTerrainGridRaf);
+  devTerrainGridRaf = requestAnimationFrame(() => {
+    devTerrainGridRaf = 0;
+    const geom = buildTerrainFollowingGridGeometry(
+      chunkTerrainLoader,
+      terrainGridTiles,
+      TILE_SIZE,
+      DEV_TERRAIN_GRID_Y_BIAS
+    );
+    if (devTerrainGrid) {
+      scene.remove(devTerrainGrid);
+      devTerrainGrid.geometry.dispose();
+      (devTerrainGrid.material as THREE.LineBasicMaterial).dispose();
+    }
+    const mat = new THREE.LineBasicMaterial({
+      color: 0x8a8598,
+      transparent: true,
+      opacity: 0.75,
+      depthWrite: false,
+    });
+    devTerrainGrid = new THREE.LineSegments(geom, mat);
+    devTerrainGrid.renderOrder = 1;
+    scene.add(devTerrainGrid);
+  });
+}
+
+/** Filled in once {@link syncPathfindingDemoTileNav} exists; keeps pathfinding in sync with streamed terrain. */
+let onChunkTerrainMeshesRebuilt: () => void = () => {};
+
+const chunkTerrainLoader = new ChunkTerrainLoader(scene, {
+  levelBaseUrl: `${import.meta.env.BASE_URL}levels/`,
+  onChunkMeshRebuilt: () => onChunkTerrainMeshesRebuilt(),
+});
+await chunkTerrainLoader.syncToWorldTile(5, 5);
+const terrainRoot = chunkTerrainLoader.terrainRoot;
+let lastTerrainChunkSync = { cx: Math.floor(5 / CHUNK_SIZE), cz: Math.floor(5 / CHUNK_SIZE) };
+
+/** South-middle tile of the pen threshold (doorway). Edge to (18,8) toggles with the gate. */
+const PATHFINDING_DEMO_GATE_TILE: GridTile = { x: 18, z: 7 };
+
+/**
+ * Pen walls use edge blocking; inner floor stays occupiable when the gate is closed.
+ * Grid convention matches pathfinding: +z is north, so the doorway is (18,7)↔(18,8) on the north edge of (18,7).
+ */
+function pathfindingDemoPenNavExceptions(
+  gateOpen: boolean
+): ReadonlyArray<{ tile: GridTile; profile: TileNavProfile }> {
+  const e: Array<{ tile: GridTile; profile: TileNavProfile }> = [
+    { tile: { x: 17, z: 5 }, profile: { north: true, east: true, south: false, west: false } },
+    { tile: { x: 18, z: 5 }, profile: { north: true, east: true, south: false, west: true } },
+    { tile: { x: 19, z: 5 }, profile: { north: true, east: false, south: false, west: true } },
+    { tile: { x: 17, z: 6 }, profile: { north: true, east: true, south: true, west: false } },
+    { tile: { x: 19, z: 6 }, profile: { north: true, east: false, south: true, west: true } },
+    { tile: { x: 17, z: 7 }, profile: { north: false, east: true, south: true, west: false } },
+    { tile: { x: 19, z: 7 }, profile: { north: false, east: false, south: true, west: true } },
+    { tile: { x: 17, z: 4 }, profile: { north: false, east: true, south: true, west: true } },
+    { tile: { x: 18, z: 4 }, profile: { north: false, east: true, south: true, west: true } },
+    { tile: { x: 19, z: 4 }, profile: { north: false, east: true, south: true, west: true } },
+    { tile: { x: 16, z: 5 }, profile: { north: true, east: false, south: true, west: true } },
+    { tile: { x: 16, z: 6 }, profile: { north: true, east: false, south: true, west: true } },
+    { tile: { x: 16, z: 7 }, profile: { north: true, east: false, south: true, west: true } },
+    { tile: { x: 20, z: 5 }, profile: { north: true, east: true, south: true, west: false } },
+    { tile: { x: 20, z: 6 }, profile: { north: true, east: true, south: true, west: false } },
+    { tile: { x: 20, z: 7 }, profile: { north: true, east: true, south: true, west: false } },
+    { tile: { x: 17, z: 8 }, profile: { north: true, east: true, south: false, west: true } },
+    { tile: { x: 19, z: 8 }, profile: { north: true, east: true, south: false, west: true } },
+  ];
+  if (!gateOpen) {
+    e.push(
+      {
+        tile: { x: 18, z: 7 },
+        profile: { north: false, east: true, south: true, west: true },
+      },
+      {
+        tile: { x: 18, z: 8 },
+        profile: { north: true, east: true, south: false, west: true },
+      }
+    );
+  }
+  return e;
+}
+
+let pathfindingDemoGateOpen = false;
+/** After left-click pathing to the pen, open or close when the player reaches a tile ortho-adjacent to the gate. */
+let pendingPathfindingGateAction: null | 'open' | 'close' = null;
+/** Hinge + door mesh for raycast / animation. */
+const pathfindingDemoGatePivot = new THREE.Group();
+/** Fence + gate (one object tree for “first hit” ray picks vs terrain behind). */
+const pathfindingDemoPenRoot = new THREE.Group();
+
+function syncPathfindingDemoTileNav(): void {
+  replaceTileNavExceptions([
+    ...gatheringTileNavExceptions(),
+    ...pathfindingDemoPenNavExceptions(pathfindingDemoGateOpen),
+    ...chunkTerrainLoader.getWaterTileNavExceptions(),
+  ]);
+}
+
+onChunkTerrainMeshesRebuilt = () => {
+  refreshDevTerrainGrid();
+  syncPathfindingDemoTileNav();
+  refreshWaterTileIndicators();
+};
+
+function setPathfindingDemoGateOpen(open: boolean): void {
+  pathfindingDemoGateOpen = open;
+  pendingPathfindingGateAction = null;
+  syncPathfindingDemoTileNav();
+  pathfindingDemoGatePivot.rotation.y = open ? -Math.PI * 0.42 : 0;
+}
+
+{
+  const fenceMat = new THREE.MeshStandardMaterial({ color: 0x6b4a32, roughness: 0.9, metalness: 0.05 });
+  const gateMat = new THREE.MeshStandardMaterial({ color: 0x7a5030, roughness: 0.85, metalness: 0.12 });
+  const H = 0.72;
+  const T = 0.14;
+  const span = 3 * TILE_SIZE + 0.35;
+  const y = H / 2;
+  const minX = 17 * TILE_SIZE;
+  const maxX = 20 * TILE_SIZE;
+  const minZ = 5 * TILE_SIZE;
+  const maxZ = 8 * TILE_SIZE;
+  const cx = (minX + maxX) / 2;
+  const cz = (minZ + maxZ) / 2;
+  const GATE_CLEAR = TILE_SIZE * 0.92;
+  const southZ = maxZ + T / 2;
+  const leftSouthLen = cx - GATE_CLEAR / 2 - minX;
+  const rightSouthLen = maxX - (cx + GATE_CLEAR / 2);
+
+  const west = new THREE.Mesh(new THREE.BoxGeometry(T, H, span), fenceMat);
+  west.position.set(minX - T / 2, y, cz);
+  const east = new THREE.Mesh(new THREE.BoxGeometry(T, H, span), fenceMat);
+  east.position.set(maxX + T / 2, y, cz);
+  const north = new THREE.Mesh(new THREE.BoxGeometry(span, H, T), fenceMat);
+  north.position.set(cx, y, minZ - T / 2);
+
+  const southLeft = new THREE.Mesh(new THREE.BoxGeometry(Math.max(0.05, leftSouthLen), H, T), fenceMat);
+  southLeft.position.set(minX + leftSouthLen / 2, y, southZ);
+  const southRight = new THREE.Mesh(new THREE.BoxGeometry(Math.max(0.05, rightSouthLen), H, T), fenceMat);
+  southRight.position.set(maxX - rightSouthLen / 2, y, southZ);
+
+  pathfindingDemoGatePivot.position.set(cx - GATE_CLEAR / 2, 0, southZ);
+  const gateDoor = new THREE.Mesh(new THREE.BoxGeometry(GATE_CLEAR, H * 0.92, T * 1.2), gateMat);
+  gateDoor.position.set(GATE_CLEAR / 2, y, 0);
+  gateDoor.castShadow = true;
+  gateDoor.receiveShadow = true;
+  pathfindingDemoGatePivot.add(gateDoor);
+
+  for (const m of [west, east, north, southLeft, southRight]) {
+    m.castShadow = true;
+    m.receiveShadow = true;
+    pathfindingDemoPenRoot.add(m);
+  }
+  pathfindingDemoPenRoot.add(pathfindingDemoGatePivot);
+  scene.add(pathfindingDemoPenRoot);
+}
+
+const PEN_RAT_COLLISION_RADIUS = PEN_RAT_SIZE * 0.45;
+const {
+  penRatNpcs,
+  penRatGroup,
+  wildlifeNpcs,
+  startingWildlifeGroup,
+  enemies,
+} = createNpcSceneContent();
+scene.add(penRatGroup);
+const PEN_RAT_LURCH_DURATION = 0.26;
+const PEN_RAT_LURCH_DISTANCE = 0.4;
+const PEN_RAT_LURCH_HOP_Y = 0.07;
+
+/** Spiders and bears near spawn; chase + ortho bite only if player within this many tiles (Chebyshev grid distance). */
+const STARTING_WILDLIFE_AGGRO_TILES = 4;
+scene.add(startingWildlifeGroup);
+
+syncPathfindingDemoTileNav();
+
+function createGroundTileHighlight(color: number, opacity: number): THREE.Mesh {
+  const geometry = new THREE.PlaneGeometry(TILE_SIZE * 0.96, TILE_SIZE * 0.96);
+  geometry.rotateX(-Math.PI / 2);
+  const material = new THREE.MeshBasicMaterial({
+    color,
+    transparent: true,
+    opacity,
+    depthWrite: false,
+  });
+  material.polygonOffset = true;
+  material.polygonOffsetFactor = -1;
+  material.polygonOffsetUnits = -1;
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.renderOrder = 2;
+  return mesh;
+}
+
+/** Visual: logical tile under player (world position → grid). */
+const playerTrueTileMarker = createGroundTileHighlight(0x00b8d9, 0.38);
+playerTrueTileMarker.position.y = 0.035;
+scene.add(playerTrueTileMarker);
+
+/** Visual: destination tile for current click-to-move path. */
+const moveTargetTileMarker = createGroundTileHighlight(0xffaa33, 0.42);
+moveTargetTileMarker.position.y = 0.038;
+moveTargetTileMarker.visible = false;
+scene.add(moveTargetTileMarker);
+
+/** Dev-only terrain-hugging tile grid — built in {@link refreshDevTerrainGrid} (after chunk sync / edits). */
+
 scene.add(enemies);
 
 createIsoLights(scene);
 
-const character = createPlaceholderCharacter([10, 0, 10]);
+const character = createPlaceholderCharacter([SPAWN_POSITION.x, SPAWN_POSITION.y, SPAWN_POSITION.z]);
 scene.add(character);
+
+function samplePlayerGroundY(wx: number, wz: number): number {
+  return chunkTerrainLoader.sampleSurfaceHeightAtWorldXZ(wx, wz);
+}
+
+function snapCharacterYToTerrain(): void {
+  character.position.y = samplePlayerGroundY(character.position.x, character.position.z);
+}
+
+/** If the character is on a blocked tile (e.g. water), move to the nearest walkable tile center. */
+function snapCharacterXZToNearestWalkable(): void {
+  const t = worldXZToTile(character.position.x, character.position.z);
+  const safe = findNearestOccupiableTile(t);
+  if (safe === null) return;
+  const c = tileCenterXZ(safe);
+  character.position.x = c.x;
+  character.position.z = c.z;
+}
+
+function snapCharacterToWalkableGround(): void {
+  snapCharacterXZToNearestWalkable();
+  snapCharacterYToTerrain();
+}
+
+snapCharacterToWalkableGround();
+
+/** Static practice target (white cube); tile is authoritative for melee adjacency. */
+const TRAINING_DUMMY_TILE: GridTile = { x: 14, z: 14 };
+const TRAINING_DUMMY_SIZE = 0.72;
+const MAX_TRAINING_DUMMY_HP = 10_000;
+let trainingDummyAlive = true;
+let trainingDummyHealth = MAX_TRAINING_DUMMY_HP;
+const trainingDummyWorldPos = new THREE.Vector3();
+const trainingDummyGroup = new THREE.Group();
+{
+  const h = TRAINING_DUMMY_SIZE * 1.1;
+  const geom = new THREE.BoxGeometry(TRAINING_DUMMY_SIZE, h, TRAINING_DUMMY_SIZE);
+  const mat = new THREE.MeshStandardMaterial({ color: 0xf2f2f2, roughness: 0.55, metalness: 0.08 });
+  const mesh = new THREE.Mesh(geom, mat);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  const tc = tileCenterXZ(TRAINING_DUMMY_TILE);
+  trainingDummyGroup.position.set(tc.x, h / 2, tc.z);
+  trainingDummyWorldPos.set(tc.x, h / 2, tc.z);
+  trainingDummyGroup.add(mesh);
+}
+scene.add(trainingDummyGroup);
+
+const gatheringNodesRoot = createGatheringNodesRoot();
+scene.add(gatheringNodesRoot);
 
 // Sword orbit radius/hit/cooldown (augment modifiers) — passed to combat/Sword
 function getSwordOrbitRadius(): number {
@@ -835,7 +1365,6 @@ const lastEnemyDamageTime: number[] = Array(ENEMY_COUNT).fill(-999);
 
 // Caster enemies: purple capsules that throw fireballs at the player
 const CASTER_COUNT = 5;
-const CASTER_SPEED = 2.2;
 const CASTER_SIZE = 0.6;
 const CASTER_PREFERRED_RANGE = 10;  // distance from player casters try to maintain (kite range)
 const CASTER_FIREBALL_COOLDOWN = 2.2;
@@ -874,14 +1403,19 @@ for (let i = 0; i < CASTER_COUNT; i++) {
 const MAX_CASTER_HEALTH = 90;
 const casterHealth = Array(CASTER_COUNT).fill(MAX_CASTER_HEALTH);
 const lastCasterResurrectTime: number[] = Array(CASTER_COUNT).fill(-999);
+const casterLogicalTile: GridTile[] = Array.from({ length: CASTER_COUNT }, () => ({ x: 0, z: 0 }));
+/** xz + height for combat / clicks (authoritative each tick). */
+const casterLogicalPos = Array.from({ length: CASTER_COUNT }, () => new THREE.Vector3());
+const casterVisFrom: { x: number; z: number }[] = Array.from({ length: CASTER_COUNT }, () => ({ x: 0, z: 0 }));
+const casterVisTo: { x: number; z: number }[] = Array.from({ length: CASTER_COUNT }, () => ({ x: 0, z: 0 }));
 
 /** Returns true if the caster died. Does not dispose mesh so casters can be reused for next level. */
 function damageCaster(c: number, amount: number): boolean {
-  createHitMarker(casterMeshes[c].position, amount);
+  hitMarkers.createPlayerHitMarker(casterLogicalPos[c], amount);
   casterHealth[c] = Math.max(0, casterHealth[c] - amount);
   if (casterHealth[c] <= 0) {
     addXp(XP_CASTER);
-    trySpawnDrop(casterMeshes[c].position.clone(), 'caster');
+    trySpawnDrop(casterLogicalPos[c].clone(), 'caster');
     casterGroup.remove(casterMeshes[c]);
     casterAlive[c] = false;
     return true;
@@ -893,7 +1427,6 @@ scene.add(casterGroup);
 
 // Resurrector enemies: resurrect fallen grunts (spawn from wave 5, after double casters)
 const RESURRECTOR_COUNT = 3;
-const RESURRECTOR_SPEED = 1.8;
 const RESURRECTOR_SIZE = 0.55;
 const RESURRECTOR_PREFERRED_RANGE = 8;
 
@@ -923,14 +1456,24 @@ for (let i = 0; i < RESURRECTOR_COUNT; i++) {
 }
 const MAX_RESURRECTOR_HEALTH = 70;
 const resurrectorHealth = Array(RESURRECTOR_COUNT).fill(MAX_RESURRECTOR_HEALTH);
+const resurrectorLogicalTile: GridTile[] = Array.from({ length: RESURRECTOR_COUNT }, () => ({ x: 0, z: 0 }));
+const resurrectorLogicalPos = Array.from({ length: RESURRECTOR_COUNT }, () => new THREE.Vector3());
+const resurrectorVisFrom: { x: number; z: number }[] = Array.from({ length: RESURRECTOR_COUNT }, () => ({
+  x: 0,
+  z: 0,
+}));
+const resurrectorVisTo: { x: number; z: number }[] = Array.from({ length: RESURRECTOR_COUNT }, () => ({
+  x: 0,
+  z: 0,
+}));
 
 /** Returns true if the resurrector died. */
 function damageResurrector(r: number, amount: number): boolean {
-  createHitMarker(resurrectorMeshes[r].position, amount);
+  hitMarkers.createPlayerHitMarker(resurrectorLogicalPos[r], amount);
   resurrectorHealth[r] = Math.max(0, resurrectorHealth[r] - amount);
   if (resurrectorHealth[r] <= 0) {
     addXp(XP_RESURRECTOR);
-    trySpawnDrop(resurrectorMeshes[r].position.clone(), 'resurrector');
+    trySpawnDrop(resurrectorLogicalPos[r].clone(), 'resurrector');
     resurrectorGroup.remove(resurrectorMeshes[r]);
     resurrectorAlive[r] = false;
     return true;
@@ -949,13 +1492,42 @@ const poisonPoolsApi = createPoisonPools(scene, {
   indicatorDuration: POISON_INDICATOR_DURATION,
 });
 
+/** Run = 2 tiles per game tick, walk = 1 (see {@link processPlayerPathTick}). */
+let playerRunEnabled = true;
+
+const RUN_ENERGY_MAX = 100;
+/** 0–{@link RUN_ENERGY_MAX}; drained only when a tick advances 2 path tiles; regen when idle on a tick. */
+let playerRunEnergy = RUN_ENERGY_MAX;
+const RUN_ENERGY_DRAIN_PER_RUN_TICK = 6;
+const RUN_ENERGY_REGEN_PER_IDLE_TICK = 5;
+
+function tickRunEnergyRegen(): void {
+  playerRunEnergy = Math.min(RUN_ENERGY_MAX, playerRunEnergy + RUN_ENERGY_REGEN_PER_IDLE_TICK);
+}
+
+/** Called only after a tick that advanced the path by 2 tiles (true run stride). */
+function drainRunEnergyAfterRunStep(): void {
+  playerRunEnergy = Math.max(0, playerRunEnergy - RUN_ENERGY_DRAIN_PER_RUN_TICK);
+  if (playerRunEnergy <= 0) {
+    playerRunEnergy = 0;
+    playerRunEnabled = false;
+  }
+}
+
 const hud = createHUD(container, {
   enemyCount: ENEMY_COUNT,
   casterCount: CASTER_COUNT,
   resurrectorCount: RESURRECTOR_COUNT,
   teleporterCount: TELEPORTER_COUNT,
+  onRunToggle: () => {
+    if (playerRunEnabled) {
+      playerRunEnabled = false;
+    } else if (playerRunEnergy > 0) {
+      playerRunEnabled = true;
+    }
+  },
 });
-hud.getBarsRoot().insertBefore(equipmentPanelEl, hud.getBarsRoot().firstChild);
+applyGameOptions(renderer, gameOptions);
 
 // Boss is created later (after trySpawnDrop); API used for combat and HUD
 let bossApi: BossApi;
@@ -1005,52 +1577,423 @@ function createEnemyFireballMesh(): THREE.Mesh {
 
 const groundItemsApi = createGroundItems({
   scene,
-  getCamera: () => isoCamera.three,
+  getCamera: () => followCamera.three,
   container,
   canvas,
   tryAddToInventory: (itemId) => inventory.addItem(itemId),
   canInteract: () => !isDead && !isPaused,
+  isPlayerOnItemTile: (itemTile) => {
+    const pt = getPlayerPathTile();
+    return pt.x === itemTile.x && pt.z === itemTile.z;
+  },
+  onPickupOutOfRange: () =>
+    addChatMessage('You need to stand on the same tile as the item to pick it up.'),
+  requestWalkOrPickup: requestWalkOrPickupGroundItem,
 });
+
+function tryConsumePendingGroundPickup(): void {
+  const pid = pendingGroundPickupId;
+  pendingGroundPickupId = null;
+  if (pid === null) return;
+  if (!groundItemsApi.tryPickupById(pid)) {
+    addChatMessage('The item is no longer there, or your inventory is full.');
+  }
+}
 
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
-const TERRAIN_XZ_MIN = 0;
-const TERRAIN_XZ_MAX = 48;
-const CHARACTER_MOVE_SPEED = 12;
-const MOVE_ARRIVAL_DIST = 0.05;
 
-let moveTarget: THREE.Vector3 | null = null;
+/** OSRS-style path: tile indices from BFS; each tick advances 1 tile (walk) or 2 (run); mesh lerps like NPCs. */
+let tilePath: { x: number; z: number }[] | null = null;
+let pathProgressIndex = 0;
+/** Goal tile for active movement (highlights target on ground). */
+let moveGoalTile: GridTile | null = null;
+/** Terrain goal (world XZ) applied on the next `processPlayerPathTick` while already walking. */
+let pendingWorldGoal: { x: number; z: number } | null = null;
+/** When set, finishing the current path (or snapping onto the goal tile) runs a pickup attempt by id. */
+let pendingGroundPickupId: number | null = null;
+const playerMoveVisFrom = { x: 0, z: 0 };
+const playerMoveVisTo = { x: 0, z: 0 };
+
+function clearTileMovementOnly(): void {
+  tilePath = null;
+  pathProgressIndex = 0;
+  moveGoalTile = null;
+  pendingWorldGoal = null;
+  pendingPathfindingGateAction = null;
+  moveTargetTileMarker.visible = false;
+}
+
+function clearTileMovement(): void {
+  clearTileMovementOnly();
+  pendingGroundPickupId = null;
+}
+
+/** Tile the player officially occupies: path step until a leg finishes, not world position mid-lerp. */
+function getPlayerPathTile(): GridTile {
+  if (tilePath !== null) {
+    const t = tilePath[pathProgressIndex];
+    return { x: t.x, z: t.z };
+  }
+  return worldXZToTile(character.position.x, character.position.z);
+}
+
+const terrainEditPanel = createTerrainEditPanel(container, {
+  getPaletteSource: () => chunkTerrainLoader.getAnyLoadedChunk(),
+  onVisibilityChange: () => refreshWaterTileIndicators(),
+});
+
+refreshWaterTileIndicators = (): void => {
+  if (waterTileIndicatorsRaf !== 0) cancelAnimationFrame(waterTileIndicatorsRaf);
+  waterTileIndicatorsRaf = requestAnimationFrame(() => {
+    waterTileIndicatorsRaf = 0;
+    if (!terrainEditPanel.isOpen()) {
+      if (waterTileIndicatorMesh) {
+        scene.remove(waterTileIndicatorMesh);
+        waterTileIndicatorMesh.geometry.dispose();
+        (waterTileIndicatorMesh.material as THREE.MeshBasicMaterial).dispose();
+        waterTileIndicatorMesh = null;
+      }
+      return;
+    }
+    const geom = buildWaterTileIndicatorGeometry(
+      chunkTerrainLoader,
+      TERRAIN_GRID_WIDTH,
+      TERRAIN_GRID_DEPTH,
+      TILE_SIZE,
+      WATER_TILE_INDICATOR_Y_BIAS
+    );
+    if (waterTileIndicatorMesh) {
+      scene.remove(waterTileIndicatorMesh);
+      waterTileIndicatorMesh.geometry.dispose();
+      (waterTileIndicatorMesh.material as THREE.MeshBasicMaterial).dispose();
+      waterTileIndicatorMesh = null;
+    }
+    if (!geom) return;
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0x22c8e6,
+      transparent: true,
+      opacity: 0.4,
+      depthWrite: false,
+    });
+    mat.polygonOffset = true;
+    mat.polygonOffsetFactor = -1;
+    mat.polygonOffsetUnits = -1;
+    waterTileIndicatorMesh = new THREE.Mesh(geom, mat);
+    waterTileIndicatorMesh.renderOrder = 3;
+    scene.add(waterTileIndicatorMesh);
+  });
+};
+
+const terrainEditStrokeSeen = new Set<string>();
+terrainEditPanel.setExportHandlers({
+  exportThis: () => {
+    const t = getPlayerPathTile();
+    const cx = Math.floor(t.x / CHUNK_SIZE);
+    const cz = Math.floor(t.z / CHUNK_SIZE);
+    chunkTerrainLoader.triggerDownloadChunk(cx, cz);
+  },
+  exportAll: () => chunkTerrainLoader.triggerDownloadAllChunkData(),
+});
+
+function maybeSyncTerrainChunks(): void {
+  const t = getPlayerPathTile();
+  const cx = Math.floor(t.x / CHUNK_SIZE);
+  const cz = Math.floor(t.z / CHUNK_SIZE);
+  if (cx === lastTerrainChunkSync.cx && cz === lastTerrainChunkSync.cz) return;
+  lastTerrainChunkSync = { cx, cz };
+  void chunkTerrainLoader.syncToWorldTile(t.x, t.z);
+}
+
+function getPlayerLogicalWorldTileCenter(): { x: number; z: number } {
+  return tileCenterXZ(getPlayerPathTile());
+}
+
+const playerLogicalHitOrigin = new THREE.Vector3();
+
+function updatePlayerTileMarkers(): void {
+  const pt = getPlayerPathTile();
+  const pc = tileCenterXZ(pt);
+  playerTrueTileMarker.position.set(pc.x, samplePlayerGroundY(pc.x, pc.z) + 0.035, pc.z);
+
+  if (moveGoalTile !== null) {
+    const tc = tileCenterXZ(moveGoalTile);
+    moveTargetTileMarker.position.set(tc.x, samplePlayerGroundY(tc.x, tc.z) + 0.038, tc.z);
+    moveTargetTileMarker.visible = true;
+  }
+}
+
+function isTileMovementActive(): boolean {
+  return tilePath !== null;
+}
+
+/**
+ * Path from current tile to goal tile (OSRS BFS order), then move in segments of up to 2 tiles.
+ */
+function beginTilePathToWorldGoal(goalWx: number, goalWz: number): void {
+  const start = getPlayerPathTile();
+  const goal = worldXZToTile(goalWx, goalWz);
+  const path = findTilePath(start, goal);
+
+  if (path === null) {
+    clearTileMovement();
+    return;
+  }
+
+  if (path.length === 1) {
+    const { x, z } = tileCenterXZ(path[0]);
+    character.position.set(x, samplePlayerGroundY(x, z), z);
+    syncMultiplayerPathTile();
+    maybeCompletePendingPathfindingGateAction();
+    clearTileMovementOnly();
+    tryConsumePendingGroundPickup();
+    return;
+  }
+
+  moveGoalTile = { x: goal.x, z: goal.z };
+  tilePath = path;
+  pathProgressIndex = 0;
+  const c0 = tileCenterXZ(tilePath[0]);
+  playerMoveVisFrom.x = c0.x;
+  playerMoveVisFrom.z = c0.z;
+  playerMoveVisTo.x = c0.x;
+  playerMoveVisTo.z = c0.z;
+  syncMultiplayerPathTile();
+}
 
 // Auto-attack target tracking
-type AttackTargetType = 'enemy' | 'caster' | 'resurrector' | 'teleporter' | 'boss';
+type AttackTargetType =
+  | 'enemy'
+  | 'caster'
+  | 'resurrector'
+  | 'teleporter'
+  | 'boss'
+  | 'training_dummy'
+  | 'pen_rat'
+  | 'starting_wildlife';
 interface AttackTarget {
   type: AttackTargetType;
   index: number;
 }
 let attackTarget: AttackTarget | null = null;
+let gatheringTargetNodeIndex: number | null = null;
+let gatherHarvestTickCounter = 0;
+
+function clearGatheringTarget(): void {
+  gatheringTargetNodeIndex = null;
+  gatherHarvestTickCounter = 0;
+}
+
+/**
+ * Training dummy melee: first strike on the first tick orthogonally adjacent; then every 3 ticks (attack speed).
+ * -1 = not in melee range / need first hit when we become adjacent; else ticks since last swing (0..2).
+ */
+let trainingDummyMeleeTickCounter = -1;
+let pendingTrainingDummyMeleeSwings = 0;
+
+function isObjectUnderAncestor(obj: THREE.Object3D | null, ancestor: THREE.Object3D): boolean {
+  let o = obj;
+  while (o) {
+    if (o === ancestor) return true;
+    o = o.parent;
+  }
+  return false;
+}
+
+/** Nearest hit among terrain, pathfinding pen, pen rats, gathering spots, and ground items (sorted by distance). */
+function mergePickIntersections(ray: THREE.Raycaster): THREE.Intersection[] {
+  return ray.intersectObjects(
+    [
+      terrainRoot,
+      pathfindingDemoPenRoot,
+      penRatGroup,
+      startingWildlifeGroup,
+      gatheringNodesRoot,
+      groundItemsApi.getGroup(),
+    ],
+    true
+  );
+}
+
+function maybeCompletePendingPathfindingGateAction(): void {
+  const pending = pendingPathfindingGateAction;
+  if (pending === null) return;
+  if (!areOrthogonallyAdjacent(getPlayerPathTile(), PATHFINDING_DEMO_GATE_TILE)) return;
+  if (pending === 'open') setPathfindingDemoGateOpen(true);
+  else setPathfindingDemoGateOpen(false);
+}
+
+function handlePathfindingPenBarrierClick(): void {
+  attackTarget = null;
+  pendingGroundPickupId = null;
+  const pt = getPlayerPathTile();
+  if (pathfindingDemoGateOpen) {
+    if (areOrthogonallyAdjacent(pt, PATHFINDING_DEMO_GATE_TILE)) {
+      setPathfindingDemoGateOpen(false);
+      return;
+    }
+    const approachClose = findClosestReachableOrthAdjacentTile(pt, PATHFINDING_DEMO_GATE_TILE);
+    if (approachClose === null) {
+      addChatMessage("You can't reach the gate from here.");
+      return;
+    }
+    pendingPathfindingGateAction = 'close';
+    const cc = tileCenterXZ(approachClose);
+    beginTilePathToWorldGoal(cc.x, cc.z);
+    return;
+  }
+  if (areOrthogonallyAdjacent(pt, PATHFINDING_DEMO_GATE_TILE)) {
+    setPathfindingDemoGateOpen(true);
+    return;
+  }
+  const approachOpen = findClosestReachableOrthAdjacentTile(pt, PATHFINDING_DEMO_GATE_TILE);
+  if (approachOpen === null) {
+    addChatMessage("You can't reach the gate from here.");
+    return;
+  }
+  pendingPathfindingGateAction = 'open';
+  const c = tileCenterXZ(approachOpen);
+  beginTilePathToWorldGoal(c.x, c.z);
+}
+
+function pathToClosestOrthTileTowardDummy(): void {
+  pendingGroundPickupId = null;
+  const adj = findClosestReachableOrthAdjacentTile(getPlayerPathTile(), TRAINING_DUMMY_TILE);
+  if (adj === null) return;
+  const c = tileCenterXZ(adj);
+  if (tilePath !== null) {
+    pendingWorldGoal = { x: c.x, z: c.z };
+    moveGoalTile = { x: adj.x, z: adj.z };
+    const tc = tileCenterXZ(moveGoalTile);
+    moveTargetTileMarker.position.set(tc.x, moveTargetTileMarker.position.y, tc.z);
+    moveTargetTileMarker.visible = true;
+  } else {
+    beginTilePathToWorldGoal(c.x, c.z);
+  }
+}
+
+function pathToClosestOrthTileTowardGatheringNode(nodeIndex: number): void {
+  pendingGroundPickupId = null;
+  const def = GATHERING_NODE_DEFINITIONS[nodeIndex];
+  if (!def) return;
+  const adj = findClosestReachableOrthAdjacentTile(getPlayerPathTile(), def.tile);
+  if (adj === null) {
+    addChatMessage("You can't reach that from here.");
+    return;
+  }
+  const c = tileCenterXZ(adj);
+  if (tilePath !== null) {
+    pendingWorldGoal = { x: c.x, z: c.z };
+    moveGoalTile = { x: adj.x, z: adj.z };
+    const tc = tileCenterXZ(moveGoalTile);
+    moveTargetTileMarker.position.set(tc.x, moveTargetTileMarker.position.y, tc.z);
+    moveTargetTileMarker.visible = true;
+  } else {
+    beginTilePathToWorldGoal(c.x, c.z);
+  }
+}
+
+/** True when our true tile is orthogonally adjacent to the dummy (combat range), including mid-path lerp. */
+function isAtTrainingDummyMeleeStand(): boolean {
+  const pt = getPlayerPathTile();
+  return areOrthogonallyAdjacent(pt, TRAINING_DUMMY_TILE);
+}
 
 function setMoveTargetFromMouse(clientX: number, clientY: number): void {
   const rect = canvas.getBoundingClientRect();
   pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
   pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
-  raycaster.setFromCamera(pointer, isoCamera.three);
+  raycaster.setFromCamera(pointer, followCamera.three);
 
-  if (groundItemsApi.tryPickupFromRaycast(raycaster)) return;
+  const picks = mergePickIntersections(raycaster);
+  if (picks.length === 0) return;
+  const top = picks[0];
 
-  // Get the ground intersection point
-  const hits = raycaster.intersectObject(terrain);
-  if (hits.length === 0) return;
-  const groundPoint = hits[0].point;
+  const groundPickHit = groundItemsApi.resolveGroundItemFromIntersection(top);
+  if (groundPickHit) {
+    requestWalkOrPickupGroundItem(groundPickHit.id);
+    return;
+  }
+
+  const ratPickIdx = penRatIndexFromIntersection(top);
+  if (ratPickIdx !== null && penRatNpcs[ratPickIdx].alive && penRatNpcs[ratPickIdx].attackable) {
+    clearGatheringTarget();
+    attackTarget = { type: 'pen_rat', index: ratPickIdx };
+    clearTileMovement();
+    return;
+  }
+
+  const wildlifePickIdx = startingWildlifeIndexFromIntersection(top);
+  if (
+    wildlifePickIdx !== null &&
+    wildlifeNpcs[wildlifePickIdx].alive &&
+    wildlifeNpcs[wildlifePickIdx].attackable
+  ) {
+    clearGatheringTarget();
+    attackTarget = { type: 'starting_wildlife', index: wildlifePickIdx };
+    clearTileMovement();
+    return;
+  }
+
+  if (isObjectUnderAncestor(top.object, pathfindingDemoPenRoot)) {
+    handlePathfindingPenBarrierClick();
+    return;
+  }
+
+  const gClickIdx = gatheringNodeIndexFromIntersection(top);
+  if (gClickIdx !== null) {
+    attackTarget = null;
+    if (gatheringTargetNodeIndex !== gClickIdx) gatherHarvestTickCounter = 0;
+    gatheringTargetNodeIndex = gClickIdx;
+    pathToClosestOrthTileTowardGatheringNode(gClickIdx);
+    return;
+  }
+
+  const groundPoint = top.point;
   const clickRadius = 1.5; // How close to a monster's position counts as clicking it
-  
+
+  if (trainingDummyAlive) {
+    const dx = groundPoint.x - trainingDummyWorldPos.x;
+    const dz = groundPoint.z - trainingDummyWorldPos.z;
+    if (Math.sqrt(dx * dx + dz * dz) <= clickRadius + TRAINING_DUMMY_SIZE * 0.35) {
+      clearGatheringTarget();
+      attackTarget = { type: 'training_dummy', index: 0 };
+      pathToClosestOrthTileTowardDummy();
+      return;
+    }
+  }
+
+  for (let ri = 0; ri < PEN_RAT_COUNT; ri++) {
+    const pr = penRatNpcs[ri];
+    if (!pr.alive || !pr.attackable) continue;
+    if (groundPoint.distanceTo(pr.position) <= clickRadius + PEN_RAT_COLLISION_RADIUS) {
+      clearGatheringTarget();
+      attackTarget = { type: 'pen_rat', index: ri };
+      clearTileMovement();
+      return;
+    }
+  }
+
+  for (let wi = 0; wi < STARTING_WILDLIFE_COUNT; wi++) {
+    const wn = wildlifeNpcs[wi];
+    if (!wn.alive || !wn.attackable) continue;
+    if (groundPoint.distanceTo(wn.position) <= clickRadius + wn.collisionRadius) {
+      clearGatheringTarget();
+      attackTarget = { type: 'starting_wildlife', index: wi };
+      clearTileMovement();
+      return;
+    }
+  }
+
   // First check if clicking on a monster by checking distance from ground intersection
   // Check enemies (grunts)
   for (let j = 0; j < ENEMY_COUNT; j++) {
     if (!enemyAlive[j]) continue;
     const dist = groundPoint.distanceTo(enemyPositions[j]);
     if (dist <= clickRadius) {
+      clearGatheringTarget();
       attackTarget = { type: 'enemy', index: j };
-      moveTarget = null; // Clear move target when attacking
+      clearTileMovement(); // Clear move target when attacking
       return;
     }
   }
@@ -1058,10 +2001,11 @@ function setMoveTargetFromMouse(clientX: number, clientY: number): void {
   // Check casters
   for (let c = 0; c < CASTER_COUNT; c++) {
     if (!casterAlive[c]) continue;
-    const dist = groundPoint.distanceTo(casterMeshes[c].position);
+    const dist = groundPoint.distanceTo(casterLogicalPos[c]);
     if (dist <= clickRadius) {
+      clearGatheringTarget();
       attackTarget = { type: 'caster', index: c };
-      moveTarget = null;
+      clearTileMovement();
       return;
     }
   }
@@ -1069,10 +2013,11 @@ function setMoveTargetFromMouse(clientX: number, clientY: number): void {
   // Check resurrectors
   for (let r = 0; r < RESURRECTOR_COUNT; r++) {
     if (!resurrectorAlive[r]) continue;
-    const dist = groundPoint.distanceTo(resurrectorMeshes[r].position);
+    const dist = groundPoint.distanceTo(resurrectorLogicalPos[r]);
     if (dist <= clickRadius) {
+      clearGatheringTarget();
       attackTarget = { type: 'resurrector', index: r };
-      moveTarget = null;
+      clearTileMovement();
       return;
     }
   }
@@ -1082,8 +2027,9 @@ function setMoveTargetFromMouse(clientX: number, clientY: number): void {
     if (!teleportersApi.isAlive(t)) continue;
     const dist = groundPoint.distanceTo(teleportersApi.getPosition(t));
     if (dist <= clickRadius) {
+      clearGatheringTarget();
       attackTarget = { type: 'teleporter', index: t };
-      moveTarget = null;
+      clearTileMovement();
       return;
     }
   }
@@ -1092,27 +2038,455 @@ function setMoveTargetFromMouse(clientX: number, clientY: number): void {
   if (bossApi.isAlive()) {
     const dist = groundPoint.distanceTo(bossApi.getPosition());
     if (dist <= bossApi.getHitboxRadius()) {
+      clearGatheringTarget();
       attackTarget = { type: 'boss', index: 0 };
-      moveTarget = null;
+      clearTileMovement();
       return;
     }
   }
   
-  // If no monster clicked, set move target on terrain
+  // If no monster clicked, path to clicked tile (center), OSRS-style BFS + 2-tile legs
   attackTarget = null; // Clear attack target when clicking terrain
-  const p = groundPoint;
-  const x = Math.max(TERRAIN_XZ_MIN, Math.min(TERRAIN_XZ_MAX, p.x));
-  const z = Math.max(TERRAIN_XZ_MIN, Math.min(TERRAIN_XZ_MAX, p.z));
-  if (moveTarget === null) moveTarget = new THREE.Vector3();
-  moveTarget.set(x, 0, z);
+  walkToGroundPoint(groundPoint);
 }
 
-// Right-click: prevent context menu
-clickOverlay.addEventListener('contextmenu', (e) => e.preventDefault());
+function walkToGroundPoint(p: THREE.Vector3): void {
+  pendingPathfindingGateAction = null;
+  clearGatheringTarget();
+  pendingGroundPickupId = null;
+  const x = Math.max(TERRAIN_XZ_MIN, Math.min(TERRAIN_XZ_MAX, p.x));
+  const z = Math.max(TERRAIN_XZ_MIN, Math.min(TERRAIN_XZ_MAX, p.z));
+  if (tilePath !== null) {
+    pendingWorldGoal = { x, z };
+    moveGoalTile = worldXZToTile(x, z);
+    const tc = tileCenterXZ(moveGoalTile);
+    moveTargetTileMarker.position.set(tc.x, moveTargetTileMarker.position.y, tc.z);
+    moveTargetTileMarker.visible = true;
+    return;
+  }
+  beginTilePathToWorldGoal(x, z);
+}
+
+function requestWalkOrPickupGroundItem(itemId: number): void {
+  if (isDead || isPaused) return;
+  const goal = groundItemsApi.getPickupGoalXZ(itemId);
+  if (goal === null) {
+    addChatMessage('The item is no longer there.');
+    return;
+  }
+  pendingPathfindingGateAction = null;
+  clearGatheringTarget();
+  attackTarget = null;
+  const itemTile = worldXZToTile(goal.x, goal.z);
+  const pt = getPlayerPathTile();
+  if (pt.x === itemTile.x && pt.z === itemTile.z) {
+    pendingGroundPickupId = null;
+    if (!groundItemsApi.tryPickupById(itemId)) {
+      addChatMessage('The item is no longer there, or your inventory is full.');
+    }
+    return;
+  }
+  pendingGroundPickupId = itemId;
+  const x = Math.max(TERRAIN_XZ_MIN, Math.min(TERRAIN_XZ_MAX, goal.x));
+  const z = Math.max(TERRAIN_XZ_MIN, Math.min(TERRAIN_XZ_MAX, goal.z));
+  if (tilePath !== null) {
+    pendingWorldGoal = { x, z };
+    moveGoalTile = worldXZToTile(x, z);
+    const tc = tileCenterXZ(moveGoalTile);
+    moveTargetTileMarker.position.set(tc.x, moveTargetTileMarker.position.y, tc.z);
+    moveTargetTileMarker.visible = true;
+  } else {
+    beginTilePathToWorldGoal(x, z);
+  }
+}
+
+function startAttackTarget(target: AttackTarget): void {
+  clearGatheringTarget();
+  attackTarget = target;
+  if (target.type === 'training_dummy') {
+    pathToClosestOrthTileTowardDummy();
+    return;
+  }
+  clearTileMovement();
+}
+
+type ContextMenuTarget =
+  | { kind: 'tile'; groundPoint: THREE.Vector3 }
+  | { kind: 'gate' }
+  | { kind: 'ground_item'; id: number; itemId: ItemId }
+  | { kind: 'gathering'; nodeIndex: number }
+  | { kind: 'attackable'; target: AttackTarget };
+
+function setRayFromCanvasClient(clientX: number, clientY: number): void {
+  const rect = canvas.getBoundingClientRect();
+  pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointer, followCamera.three);
+}
+
+function tryTerrainEditPaint(clientX: number, clientY: number): void {
+  if (!terrainEditPanel.isOpen() || isDead || isPaused) return;
+  setRayFromCanvasClient(clientX, clientY);
+  const hits = raycaster.intersectObject(terrainRoot, true);
+  if (hits.length === 0) return;
+  const p = hits[0]!.point;
+  const tile = worldXZToTile(p.x, p.z);
+  const key = `${tile.x},${tile.z}`;
+  if (terrainEditStrokeSeen.has(key)) return;
+  terrainEditStrokeSeen.add(key);
+  applyTerrainPaintAtTile(
+    chunkTerrainLoader,
+    tile.x,
+    tile.z,
+    terrainEditPanel.getMode(),
+    terrainEditPanel.getTextureBrushIndex(),
+    terrainEditPanel.getHeightStep(),
+    terrainEditPanel.getBrushRadius()
+  );
+  multiplayerClient?.sendTerrainEdit(
+    tile.x,
+    tile.z,
+    terrainEditPanel.getMode(),
+    terrainEditPanel.getTextureBrushIndex(),
+    terrainEditPanel.getHeightStep(),
+    terrainEditPanel.getBrushRadius()
+  );
+}
+
+function resolveContextMenuTarget(clientX: number, clientY: number): ContextMenuTarget | null {
+  if (isDead || isPaused) return null;
+  setRayFromCanvasClient(clientX, clientY);
+
+  const picks = mergePickIntersections(raycaster);
+  if (picks.length === 0) return null;
+  const top = picks[0];
+
+  const itemHit = groundItemsApi.resolveGroundItemFromIntersection(top);
+  if (itemHit) return { kind: 'ground_item', id: itemHit.id, itemId: itemHit.itemId };
+
+  const ratCtxIdx = penRatIndexFromIntersection(top);
+  if (ratCtxIdx !== null && penRatNpcs[ratCtxIdx].alive) {
+    return { kind: 'attackable', target: { type: 'pen_rat', index: ratCtxIdx } };
+  }
+
+  const wildlifeCtxIdx = startingWildlifeIndexFromIntersection(top);
+  if (wildlifeCtxIdx !== null && wildlifeNpcs[wildlifeCtxIdx].alive) {
+    return { kind: 'attackable', target: { type: 'starting_wildlife', index: wildlifeCtxIdx } };
+  }
+
+  if (isObjectUnderAncestor(top.object, pathfindingDemoPenRoot)) return { kind: 'gate'};
+
+  const gCtxIdx = gatheringNodeIndexFromIntersection(top);
+  if (gCtxIdx !== null) return { kind: 'gathering', nodeIndex: gCtxIdx };
+
+  const groundPoint = top.point;
+  const clickRadius = 1.5;
+
+  if (trainingDummyAlive) {
+    const dx = groundPoint.x - trainingDummyWorldPos.x;
+    const dz = groundPoint.z - trainingDummyWorldPos.z;
+    if (Math.sqrt(dx * dx + dz * dz) <= clickRadius + TRAINING_DUMMY_SIZE * 0.35) {
+      return { kind: 'attackable', target: { type: 'training_dummy', index: 0 } };
+    }
+  }
+
+  for (let ri = 0; ri < PEN_RAT_COUNT; ri++) {
+    if (!penRatNpcs[ri].alive) continue;
+    if (groundPoint.distanceTo(penRatNpcs[ri].position) <= clickRadius + PEN_RAT_COLLISION_RADIUS) {
+      return { kind: 'attackable', target: { type: 'pen_rat', index: ri } };
+    }
+  }
+
+  for (let wi = 0; wi < STARTING_WILDLIFE_COUNT; wi++) {
+    if (!wildlifeNpcs[wi].alive) continue;
+    if (groundPoint.distanceTo(wildlifeNpcs[wi].position) <= clickRadius + wildlifeNpcs[wi].collisionRadius) {
+      return { kind: 'attackable', target: { type: 'starting_wildlife', index: wi } };
+    }
+  }
+
+  for (let j = 0; j < ENEMY_COUNT; j++) {
+    if (!enemyAlive[j]) continue;
+    if (groundPoint.distanceTo(enemyPositions[j]) <= clickRadius) {
+      return { kind: 'attackable', target: { type: 'enemy', index: j } };
+    }
+  }
+  for (let c = 0; c < CASTER_COUNT; c++) {
+    if (!casterAlive[c]) continue;
+    if (groundPoint.distanceTo(casterLogicalPos[c]) <= clickRadius) {
+      return { kind: 'attackable', target: { type: 'caster', index: c } };
+    }
+  }
+  for (let r = 0; r < RESURRECTOR_COUNT; r++) {
+    if (!resurrectorAlive[r]) continue;
+    if (groundPoint.distanceTo(resurrectorLogicalPos[r]) <= clickRadius) {
+      return { kind: 'attackable', target: { type: 'resurrector', index: r } };
+    }
+  }
+  for (let t = 0; t < teleportersApi.getCount(); t++) {
+    if (!teleportersApi.isAlive(t)) continue;
+    if (groundPoint.distanceTo(teleportersApi.getPosition(t)) <= clickRadius) {
+      return { kind: 'attackable', target: { type: 'teleporter', index: t } };
+    }
+  }
+  if (bossApi.isAlive() && groundPoint.distanceTo(bossApi.getPosition()) <= bossApi.getHitboxRadius()) {
+    return { kind: 'attackable', target: { type: 'boss', index: 0 } };
+  }
+
+  return { kind: 'tile', groundPoint };
+}
+
+const contextMenuEl = document.createElement('div');
+contextMenuEl.id = 'game-context-menu';
+contextMenuEl.style.cssText =
+  'display:none;position:absolute;z-index:50;min-width:148px;background:rgba(22,20,30,0.97);' +
+  'border:1px solid rgba(180,160,120,0.5);border-radius:8px;box-shadow:0 10px 28px rgba(0,0,0,0.55);padding:5px 0;';
+contextMenuEl.addEventListener('contextmenu', (e) => e.preventDefault());
+container.appendChild(contextMenuEl);
+
+function hideGameContextMenu(): void {
+  contextMenuEl.style.display = 'none';
+  contextMenuEl.replaceChildren();
+}
+
+function showContextMenuEntriesAt(
+  clientX: number,
+  clientY: number,
+  entries: { label: string; action: () => void }[]
+): void {
+  if (entries.length === 0) return;
+  hideGameContextMenu();
+  const cr = container.getBoundingClientRect();
+  let left = clientX - cr.left;
+  let top = clientY - cr.top;
+
+  for (const ent of entries) {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.textContent = ent.label;
+    row.style.cssText =
+      'display:block;width:100%;text-align:left;padding:9px 16px;border:none;background:transparent;' +
+      'color:#ece8e0;cursor:pointer;font:13px sans-serif;border-radius:4px;';
+    row.addEventListener('mouseenter', () => {
+      row.style.background = 'rgba(255,255,255,0.07)';
+    });
+    row.addEventListener('mouseleave', () => {
+      row.style.background = 'transparent';
+    });
+    row.addEventListener('mousedown', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+    });
+    row.addEventListener('click', () => {
+      ent.action();
+      hideGameContextMenu();
+    });
+    contextMenuEl.appendChild(row);
+  }
+
+  contextMenuEl.style.display = 'block';
+  contextMenuEl.style.left = `${left}px`;
+  contextMenuEl.style.top = `${top}px`;
+
+  requestAnimationFrame(() => {
+    const w = contextMenuEl.offsetWidth;
+    const h = contextMenuEl.offsetHeight;
+    if (left + w > cr.width - 4) left = Math.max(4, cr.width - w - 4);
+    if (top + h > cr.height - 4) top = Math.max(4, cr.height - h - 4);
+    contextMenuEl.style.left = `${left}px`;
+    contextMenuEl.style.top = `${top}px`;
+  });
+}
+
+function openInventorySlotContextMenu(clientX: number, clientY: number, slotIndex: number): void {
+  const stack = inventory.getSlot(slotIndex);
+  if (!stack) return;
+
+  const def = getItemDef(stack.itemId);
+
+  const equipFromThisSlot = (): void => {
+    const s = inventory.getSlot(slotIndex);
+    if (!s) return;
+    const current = equipment.getEquipped('weapon');
+    equipment.setEquipped('weapon', s.itemId);
+    inventory.setSlot(slotIndex, current ? { itemId: current, count: 1 } : null);
+  };
+
+  const entries: { label: string; action: () => void }[] = [
+    {
+      label: 'Examine',
+      action: () => addChatMessage(getExamineMessage(stack.itemId)),
+    },
+  ];
+
+  if (def.slot === 'weapon') {
+    entries.push({ label: 'Equip', action: equipFromThisSlot });
+  } else {
+    entries.push({
+      label: 'Use',
+      action: () => addChatMessage('Nothing interesting happens.'),
+    });
+  }
+
+  entries.push({
+    label: 'Drop',
+    action: () => {
+      const s = inventory.getSlot(slotIndex);
+      if (!s) return;
+      const dropPos = character.position.clone();
+      dropPos.y = 0.2;
+      dropPos.x += (Math.random() - 0.5) * 0.65;
+      dropPos.z += (Math.random() - 0.5) * 0.65;
+      groundItemsApi.spawn(dropPos, s.itemId);
+      if (s.count > 1) {
+        inventory.setSlot(slotIndex, { itemId: s.itemId, count: s.count - 1 });
+      } else {
+        inventory.setSlot(slotIndex, null);
+      }
+    },
+  });
+
+  showContextMenuEntriesAt(clientX, clientY, entries);
+}
+
+function examineAttackable(target: AttackTarget): void {
+  if (target.type === 'training_dummy') {
+    addChatMessage('Training dummy — harmless; useful for melee timing and hit splats.');
+    return;
+  }
+  if (target.type === 'enemy') {
+    addChatMessage(`Red cube (grunt) #${target.index + 1}.`);
+    return;
+  }
+  if (target.type === 'caster') {
+    addChatMessage(`Caster #${target.index + 1} — keeps range and throws fireballs.`);
+    return;
+  }
+  if (target.type === 'resurrector') {
+    addChatMessage(`Resurrector #${target.index + 1} — revives fallen grunts.`);
+    return;
+  }
+  if (target.type === 'teleporter') {
+    addChatMessage(`Teleporter #${target.index + 1} — defeats spawn portals elsewhere.`);
+    return;
+  }
+  if (target.type === 'boss') {
+    addChatMessage('Boss — high health; watch for special attacks.');
+    return;
+  }
+  if (target.type === 'pen_rat') {
+    addChatMessage('A nasty rat — sharp teeth and beady eyes.');
+    return;
+  }
+  if (target.type === 'starting_wildlife') {
+    const k = wildlifeKindAt(target.index);
+    addChatMessage(
+      k === 'spider'
+        ? 'A hairy spider — skittering legs and a venomous bite.'
+        : 'A burly bear — best not to let it get too close.'
+    );
+    return;
+  }
+}
+
+
+function openGameContextMenu(clientX: number, clientY: number): void {
+  const target = resolveContextMenuTarget(clientX, clientY);
+  if (!target) return;
+
+  const entries: { label: string; action: () => void }[] = [];
+
+  if (target.kind === 'tile') {
+    entries.push({
+      label: 'Walk here',
+      action: () => {
+        attackTarget = null;
+        walkToGroundPoint(target.groundPoint);
+      },
+    });
+  } else if (target.kind === 'gathering') {
+    entries.push({
+      label: 'Harvest',
+      action: () => {
+        attackTarget = null;
+        const idx = target.nodeIndex;
+        if (gatheringTargetNodeIndex !== idx) gatherHarvestTickCounter = 0;
+        gatheringTargetNodeIndex = idx;
+        pathToClosestOrthTileTowardGatheringNode(idx);
+      },
+    });
+    entries.push({
+      label: 'Examine',
+      action: () => addChatMessage(gatheringExamineLine(target.nodeIndex)),
+    });
+  } else if (target.kind === 'gate') {
+    if (!pathfindingDemoGateOpen) {
+      entries.push({
+        label: 'Open',
+        action: () => setPathfindingDemoGateOpen(true),
+      });
+    } else {
+      entries.push({
+        label: 'Close',
+        action: () => setPathfindingDemoGateOpen(false),
+      });
+    }
+    entries.push({
+      label: 'Examine',
+      action: () =>
+        addChatMessage(
+          pathfindingDemoGateOpen
+            ? 'Pathfinding pen gate — open; you can pass the south doorway.'
+            : 'Pathfinding pen gate — closed; the doorway edge is blocked but the pen floor stays walkable inside.'
+        ),
+    });
+  } else if (target.kind === 'ground_item') {
+    const def = getItemDef(target.itemId);
+    entries.push({
+      label: 'Examine',
+      action: () => addChatMessage(`${def.name} — ${def.label} on the ground.`),
+    });
+    entries.push({
+      label: 'Pick-up',
+      action: () => requestWalkOrPickupGroundItem(target.id),
+    });
+  } else if (target.kind === 'attackable') {
+    const canAttackTarget =
+      (target.target.type !== 'pen_rat' && target.target.type !== 'starting_wildlife') ||
+      (target.target.type === 'pen_rat' && penRatNpcs[target.target.index].attackable) ||
+      (target.target.type === 'starting_wildlife' && wildlifeNpcs[target.target.index].attackable);
+    if (canAttackTarget) {
+      entries.push({
+        label: 'Attack',
+        action: () => startAttackTarget(target.target),
+      });
+    }
+    entries.push({
+      label: 'Examine',
+      action: () => examineAttackable(target.target),
+    });
+  }
+
+  showContextMenuEntriesAt(clientX, clientY, entries);
+}
+
+document.addEventListener(
+  'mousedown',
+  (ev) => {
+    if (contextMenuEl.style.display === 'none') return;
+    if (contextMenuEl.contains(ev.target as Node)) return;
+    hideGameContextMenu();
+  },
+  true
+);
 
 clickOverlay.addEventListener('mousedown', (e) => {
   if (e.button !== 0) return; // left button only
   if (isDead || isPaused) return;
+  if (terrainEditPanel.isOpen()) {
+    terrainEditStrokeSeen.clear();
+    tryTerrainEditPaint(e.clientX, e.clientY);
+    return;
+  }
   setMoveTargetFromMouse(e.clientX, e.clientY);
 });
 
@@ -1120,28 +2494,76 @@ clickOverlay.addEventListener('mousemove', (e) => {
   const rect = canvas.getBoundingClientRect();
   pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
   pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+  if (!isDead && !isPaused && terrainEditPanel.isOpen() && (e.buttons & 1) !== 0) {
+    tryTerrainEditPaint(e.clientX, e.clientY);
+    return;
+  }
   if (!isDead && !isPaused && (e.buttons & 1) !== 0) setMoveTargetFromMouse(e.clientX, e.clientY);
 });
 
-function updateCharacterMove(dt: number): void {
-  if (moveTarget === null) return;
-  const dx = moveTarget.x - character.position.x;
-  const dz = moveTarget.z - character.position.z;
-  const dist = Math.sqrt(dx * dx + dz * dz);
-  if (dist <= MOVE_ARRIVAL_DIST) {
-    character.position.set(moveTarget.x, 0, moveTarget.z);
-    moveTarget = null;
-    return;
-  }
-  const step = CHARACTER_MOVE_SPEED * dt;
-  const t = Math.min(1, step / dist);
-  character.position.x += dx * t;
-  character.position.z += dz * t;
-  character.position.y = 0;
-  // Rotate character to face movement direction
-  if (dist > 0.01) {
+function updateCharacterMove(_dt: number): void {
+  if (tilePath === null) return;
+  const a = tickClock.getTickAlpha();
+  const x = THREE.MathUtils.lerp(playerMoveVisFrom.x, playerMoveVisTo.x, a);
+  const z = THREE.MathUtils.lerp(playerMoveVisFrom.z, playerMoveVisTo.z, a);
+  const y0 = samplePlayerGroundY(playerMoveVisFrom.x, playerMoveVisFrom.z);
+  const y1 = samplePlayerGroundY(playerMoveVisTo.x, playerMoveVisTo.z);
+  character.position.set(x, THREE.MathUtils.lerp(y0, y1, a), z);
+  const dx = playerMoveVisTo.x - playerMoveVisFrom.x;
+  const dz = playerMoveVisTo.z - playerMoveVisFrom.z;
+  if (Math.abs(dx) + Math.abs(dz) > 1e-4) {
     character.rotation.y = Math.atan2(dx, dz);
   }
+}
+
+/** Advances path leg on each server tick (same cadence as `processGameTick`). */
+function processPlayerPathTick(): void {
+  if (pendingWorldGoal !== null) {
+    const g = pendingWorldGoal;
+    pendingWorldGoal = null;
+    beginTilePathToWorldGoal(g.x, g.z);
+  }
+  if (tilePath === null) {
+    tickRunEnergyRegen();
+    return;
+  }
+  const len = tilePath.length;
+  const oldIdx = pathProgressIndex;
+  if (oldIdx >= len - 1) {
+    tickRunEnergyRegen();
+    const c = tileCenterXZ(tilePath[oldIdx]);
+    character.position.set(c.x, samplePlayerGroundY(c.x, c.z), c.z);
+    syncMultiplayerPathTile();
+    maybeCompletePendingPathfindingGateAction();
+    clearTileMovementOnly();
+    tryConsumePendingGroundPickup();
+    return;
+  }
+
+  let step = 1;
+  if (playerRunEnabled) {
+    if (playerRunEnergy >= RUN_ENERGY_DRAIN_PER_RUN_TICK) {
+      step = 2;
+    } else {
+      playerRunEnabled = false;
+    }
+  }
+
+  const newIdx = Math.min(oldIdx + step, len - 1);
+  const o = tileCenterXZ(tilePath[oldIdx]);
+  const n = tileCenterXZ(tilePath[newIdx]);
+  playerMoveVisFrom.x = o.x;
+  playerMoveVisFrom.z = o.z;
+  playerMoveVisTo.x = n.x;
+  playerMoveVisTo.z = n.z;
+  pathProgressIndex = newIdx;
+
+  /** Drain only if this tick actually moved two tiles (not a single-tile “run to goal” finish). */
+  if (newIdx - oldIdx >= 2) {
+    drainRunEnergyAfterRunStep();
+  }
+  syncMultiplayerPathTile();
+  maybeCompletePendingPathfindingGateAction();
 }
 
 function updatePlayerCollisions(dt: number): void {
@@ -1160,11 +2582,35 @@ function updatePlayerCollisions(dt: number): void {
       collisionPushVec.addScaledVector(toEnemy, overlap);
     }
   }
-  
+
+  for (let ri = 0; ri < PEN_RAT_COUNT; ri++) {
+    if (!penRatNpcs[ri].alive) continue;
+    const toRat = new THREE.Vector3().subVectors(charPos, penRatNpcs[ri].position);
+    const dist = toRat.length();
+    const minDist = PLAYER_COLLISION_RADIUS + PEN_RAT_COLLISION_RADIUS;
+    if (dist < minDist && dist > 0.001) {
+      const overlap = minDist - dist;
+      toRat.normalize();
+      collisionPushVec.addScaledVector(toRat, overlap);
+    }
+  }
+
+  for (let wi = 0; wi < STARTING_WILDLIFE_COUNT; wi++) {
+    if (!wildlifeNpcs[wi].alive) continue;
+    const toW = new THREE.Vector3().subVectors(charPos, wildlifeNpcs[wi].position);
+    const dist = toW.length();
+    const minDist = PLAYER_COLLISION_RADIUS + wildlifeNpcs[wi].collisionRadius;
+    if (dist < minDist && dist > 0.001) {
+      const overlap = minDist - dist;
+      toW.normalize();
+      collisionPushVec.addScaledVector(toW, overlap);
+    }
+  }
+
   // Collision with casters
   for (let c = 0; c < CASTER_COUNT; c++) {
     if (!casterAlive[c]) continue;
-    const casterPos = casterMeshes[c].position;
+    const casterPos = casterLogicalPos[c];
     const toCaster = new THREE.Vector3().subVectors(charPos, casterPos);
     const dist = toCaster.length();
     const minDist = PLAYER_COLLISION_RADIUS + CASTER_COLLISION_RADIUS;
@@ -1178,7 +2624,7 @@ function updatePlayerCollisions(dt: number): void {
   // Collision with resurrectors
   for (let r = 0; r < RESURRECTOR_COUNT; r++) {
     if (!resurrectorAlive[r]) continue;
-    const resPos = resurrectorMeshes[r].position;
+    const resPos = resurrectorLogicalPos[r];
     const toRes = new THREE.Vector3().subVectors(charPos, resPos);
     const dist = toRes.length();
     const minDist = PLAYER_COLLISION_RADIUS + RESURRECTOR_COLLISION_RADIUS;
@@ -1214,17 +2660,42 @@ function updatePlayerCollisions(dt: number): void {
       collisionPushVec.addScaledVector(toBoss, overlap);
     }
   }
-  
+
+  if (trainingDummyAlive) {
+    const toDummy = new THREE.Vector3().subVectors(charPos, trainingDummyWorldPos);
+    toDummy.y = 0;
+    const dist = toDummy.length();
+    const minDist = PLAYER_COLLISION_RADIUS + TRAINING_DUMMY_SIZE * 0.55;
+    if (dist < minDist && dist > 0.001) {
+      const overlap = minDist - dist;
+      toDummy.normalize();
+      collisionPushVec.addScaledVector(toDummy, overlap);
+    }
+  }
+
   // Apply push to player
   if (collisionPushVec.lengthSq() > 0.0001) {
     character.position.addScaledVector(collisionPushVec, COLLISION_PUSH_STRENGTH * dt);
-    character.position.y = 0;
   }
 }
 
 function updateAutoAttack(dt: number, gameTime: number): void {
   if (attackTarget === null) return;
-  
+
+  if (attackTarget.type === 'training_dummy') {
+    if (!trainingDummyAlive) {
+      attackTarget = null;
+      return;
+    }
+    if (isAtTrainingDummyMeleeStand()) {
+      return;
+    }
+    if (!isTileMovementActive()) {
+      pathToClosestOrthTileTowardDummy();
+    }
+    return;
+  }
+
   // Get target position based on type
   let targetPos: THREE.Vector3 | null = null;
   let isAlive = false;
@@ -1241,14 +2712,14 @@ function updateAutoAttack(dt: number, gameTime: number): void {
       attackTarget = null;
       return;
     }
-    targetPos = casterMeshes[attackTarget.index].position;
+    targetPos = casterLogicalPos[attackTarget.index];
     isAlive = casterAlive[attackTarget.index];
   } else if (attackTarget.type === 'resurrector') {
     if (attackTarget.index >= RESURRECTOR_COUNT || !resurrectorAlive[attackTarget.index]) {
       attackTarget = null;
       return;
     }
-    targetPos = resurrectorMeshes[attackTarget.index].position;
+    targetPos = resurrectorLogicalPos[attackTarget.index];
     isAlive = resurrectorAlive[attackTarget.index];
   } else if (attackTarget.type === 'teleporter') {
     if (attackTarget.index >= teleportersApi.getCount() || !teleportersApi.isAlive(attackTarget.index)) {
@@ -1264,16 +2735,40 @@ function updateAutoAttack(dt: number, gameTime: number): void {
     }
     targetPos = bossApi.getPosition();
     isAlive = bossApi.isAlive();
+  } else if (attackTarget.type === 'pen_rat') {
+    if (attackTarget.index >= PEN_RAT_COUNT) {
+      attackTarget = null;
+      return;
+    }
+    const pr = penRatNpcs[attackTarget.index];
+    if (!pr.alive || !pr.attackable) {
+      attackTarget = null;
+      return;
+    }
+    targetPos = pr.position;
+    isAlive = pr.alive;
+  } else if (attackTarget.type === 'starting_wildlife') {
+    if (attackTarget.index >= STARTING_WILDLIFE_COUNT) {
+      attackTarget = null;
+      return;
+    }
+    const wn = wildlifeNpcs[attackTarget.index];
+    if (!wn.alive || !wn.attackable) {
+      attackTarget = null;
+      return;
+    }
+    targetPos = wn.position;
+    isAlive = wn.alive;
   }
-  
+
   if (!isAlive || !targetPos) {
     attackTarget = null;
     return;
   }
-  
-  const charPos = character.position;
-  const dx = targetPos.x - charPos.x;
-  const dz = targetPos.z - charPos.z;
+
+  const pCenter = getPlayerLogicalWorldTileCenter();
+  const dx = targetPos.x - pCenter.x;
+  const dz = targetPos.z - pCenter.z;
   const dist = Math.sqrt(dx * dx + dz * dz);
   
   // Calculate effective melee range (accounting for target size)
@@ -1289,15 +2784,18 @@ function updateAutoAttack(dt: number, gameTime: number): void {
     effectiveMeleeRange = RESURRECTOR_COLLISION_RADIUS + MELEE_RANGE;
   } else if (attackTarget.type === 'teleporter') {
     effectiveMeleeRange = TELEPORTER_SIZE / 2 + MELEE_RANGE;
+  } else if (attackTarget.type === 'pen_rat') {
+    effectiveMeleeRange = PEN_RAT_COLLISION_RADIUS + MELEE_RANGE;
+  } else if (attackTarget.type === 'starting_wildlife') {
+    effectiveMeleeRange = wildlifeNpcs[attackTarget.index].collisionRadius + MELEE_RANGE;
   }
-  
+
   // If in melee range, attack
   if (dist <= effectiveMeleeRange) {
-    // Calculate direction to target
     const targetDir = new THREE.Vector3(dx, 0, dz).normalize();
-    performMeleeAttack(gameTime, targetDir);
-    // Clear move target when in range to attack
-    moveTarget = null;
+    playerLogicalHitOrigin.set(pCenter.x, 0, pCenter.z);
+    performMeleeAttack(gameTime, targetDir, playerLogicalHitOrigin);
+    // Keep tile movement so the avatar keeps lerping while the swing plays on the mesh.
     // Check if target died from the attack
     if (attackTarget.type === 'enemy' && !enemyAlive[attackTarget.index]) {
       attackTarget = null;
@@ -1309,6 +2807,13 @@ function updateAutoAttack(dt: number, gameTime: number): void {
       attackTarget = null;
     } else if (attackTarget.type === 'boss' && !bossApi.isAlive()) {
       attackTarget = null;
+    } else if (attackTarget.type === 'pen_rat' && !penRatNpcs[attackTarget.index].alive) {
+      attackTarget = null;
+    } else if (
+      attackTarget.type === 'starting_wildlife' &&
+      !wildlifeNpcs[attackTarget.index].alive
+    ) {
+      attackTarget = null;
     }
   } else {
     // Bow: if in bow range, request arrow shot and stop moving
@@ -1316,20 +2821,18 @@ function updateAutoAttack(dt: number, gameTime: number): void {
     if (hasBow && dist <= BOW_RANGE && gameTime - lastBowAttackTime >= BOW_COOLDOWN) {
       pendingBowShotTarget = targetPos.clone();
       lastBowAttackTime = gameTime;
-      moveTarget = null;
+      clearTileMovement();
       return;
     }
     // Only run toward the enemy when outside range. If we're already too close (dist <= stopDistance),
-    // the computed position would be behind us and the character would run away — so don't set moveTarget.
+    // the computed position would be behind us and the character would run away — so don't path.
     const stopDistance = hasBow
       ? BOW_RANGE - 0.1
       : effectiveMeleeRange - 0.1;
-    if (dist > stopDistance && moveTarget === null) {
-      moveTarget = new THREE.Vector3();
+    if (dist > stopDistance && !isTileMovementActive()) {
       const dirToTarget = new THREE.Vector3(dx, 0, dz).normalize();
-      moveTarget.set(
+      beginTilePathToWorldGoal(
         targetPos.x - dirToTarget.x * stopDistance,
-        0,
         targetPos.z - dirToTarget.z * stopDistance
       );
     }
@@ -1339,17 +2842,21 @@ function updateAutoAttack(dt: number, gameTime: number): void {
 /** Returns current world position of attack target, or null if none/invalid. */
 function getTargetPosition(): THREE.Vector3 | null {
   if (attackTarget === null) return null;
+  if (attackTarget.type === 'training_dummy') {
+    if (!trainingDummyAlive) return null;
+    return trainingDummyWorldPos.clone();
+  }
   if (attackTarget.type === 'enemy') {
     if (attackTarget.index >= ENEMY_COUNT || !enemyAlive[attackTarget.index]) return null;
     return enemyPositions[attackTarget.index];
   }
   if (attackTarget.type === 'caster') {
     if (attackTarget.index >= CASTER_COUNT || !casterAlive[attackTarget.index]) return null;
-    return casterMeshes[attackTarget.index].position.clone();
+    return casterLogicalPos[attackTarget.index].clone();
   }
   if (attackTarget.type === 'resurrector') {
     if (attackTarget.index >= RESURRECTOR_COUNT || !resurrectorAlive[attackTarget.index]) return null;
-    return resurrectorMeshes[attackTarget.index].position.clone();
+    return resurrectorLogicalPos[attackTarget.index].clone();
   }
   if (attackTarget.type === 'teleporter') {
     if (attackTarget.index >= teleportersApi.getCount() || !teleportersApi.isAlive(attackTarget.index)) return null;
@@ -1358,6 +2865,18 @@ function getTargetPosition(): THREE.Vector3 | null {
   if (attackTarget.type === 'boss') {
     if (!bossApi.isAlive()) return null;
     return bossApi.getPosition().clone();
+  }
+  if (attackTarget.type === 'pen_rat') {
+    if (attackTarget.index >= PEN_RAT_COUNT) return null;
+    const pr = penRatNpcs[attackTarget.index];
+    if (!pr.alive || !pr.attackable) return null;
+    return pr.position.clone();
+  }
+  if (attackTarget.type === 'starting_wildlife') {
+    if (attackTarget.index >= STARTING_WILDLIFE_COUNT) return null;
+    const wn = wildlifeNpcs[attackTarget.index];
+    if (!wn.alive || !wn.attackable) return null;
+    return wn.position.clone();
   }
   return null;
 }
@@ -1371,7 +2890,6 @@ const FIREBALL_SPEED = 18;
 const FIREBALL_RADIUS = 0.35;
 const FIREBALL_TTL = 2;
 const enemyAlive = Array.from({ length: ENEMY_COUNT }, () => false);
-const enemyPosition = new THREE.Vector3();
 
 // Enemy health (grunts) and skill damage (base values; scaled by stats)
 const MAX_ENEMY_HEALTH = 30;
@@ -1390,11 +2908,17 @@ const MELEE_ARC = Math.PI / 3; // 60 degree arc in front
 const MELEE_COOLDOWN = 0.55;
 let lastMeleeTime = -999;
 
-function performMeleeAttack(gameTime: number, targetDirection?: THREE.Vector3): void {
+function performMeleeAttack(gameTime: number, targetDirection?: THREE.Vector3, hitOrigin?: THREE.Vector3): void {
   if (gameTime - lastMeleeTime < MELEE_COOLDOWN) return;
   lastMeleeTime = gameTime;
   const state = buildCombatState();
-  swordApi.performMeleeAttack(gameTime, targetDirection ?? null, state);
+  let origin: THREE.Vector3 | null = hitOrigin ?? null;
+  if (origin === null && isTileMovementActive()) {
+    const pc = getPlayerLogicalWorldTileCenter();
+    playerLogicalHitOrigin.set(pc.x, 0, pc.z);
+    origin = playerLogicalHitOrigin;
+  }
+  swordApi.performMeleeAttack(gameTime, targetDirection ?? null, state, origin);
 }
 function getMagicDamage(): number {
   return Math.round(BASE_FIREBALL_DAMAGE * (intelligence / 10));
@@ -1423,7 +2947,7 @@ let pendingBowShotTarget: THREE.Vector3 | null = null;
 
 /** Returns true if the enemy died. */
 function damageRedCube(j: number, amount: number): boolean {
-  createHitMarker(enemyPositions[j], amount);
+  hitMarkers.createPlayerHitMarker(enemyPositions[j], amount);
   enemyHealth[j] = Math.max(0, enemyHealth[j] - amount);
   if (enemyHealth[j] <= 0) {
     addXp(XP_RED_CUBE);
@@ -1436,8 +2960,83 @@ function damageRedCube(j: number, amount: number): boolean {
   return false;
 }
 
-// Enemies move toward the player, stop in range, then explode after a delay (radius damage)
-const ENEMY_SPEED = 3.5;
+function spawnPenRatLoot(pos: THREE.Vector3): void {
+  const b = pos.clone();
+  b.y = 0.2;
+  b.x += (Math.random() - 0.5) * 0.4;
+  b.z += (Math.random() - 0.5) * 0.4;
+  groundItemsApi.spawn(b, 'bones');
+  const m = pos.clone();
+  m.y = 0.2;
+  m.x += (Math.random() - 0.5) * 0.4;
+  m.z += (Math.random() - 0.5) * 0.4;
+  groundItemsApi.spawn(m, 'raw_meat');
+}
+
+/** Returns true if the rat died. */
+function damagePenRat(index: number, amount: number): boolean {
+  if (index < 0 || index >= PEN_RAT_COUNT) return false;
+  const npc = penRatNpcs[index];
+  if (!npc.alive || !npc.attackable) return false;
+  hitMarkers.createPlayerHitMarker(npc.position.clone(), amount);
+  npc.health = Math.max(0, npc.health - amount);
+  if (npc.health <= 0) {
+    addXp(XP_PEN_RAT);
+    spawnPenRatLoot(npc.position.clone());
+    npc.alive = false;
+    npc.lurchStartGameTime = -1;
+    const rat = penRatGroup.children[index] as THREE.Group;
+    if (rat) rat.position.y = -1000;
+    if (attackTarget !== null && attackTarget.type === 'pen_rat' && attackTarget.index === index) {
+      attackTarget = null;
+    }
+    return true;
+  }
+  return false;
+}
+
+function spawnStartingWildlifeLoot(index: number, pos: THREE.Vector3): void {
+  const scatter = (spread: number) => {
+    const p = pos.clone();
+    p.y = 0.2;
+    p.x += (Math.random() - 0.5) * spread;
+    p.z += (Math.random() - 0.5) * spread;
+    return p;
+  };
+  groundItemsApi.spawn(scatter(0.45), 'bones');
+  if (wildlifeKindAt(index) === 'bear') {
+    groundItemsApi.spawn(scatter(0.45), 'raw_meat');
+  }
+  trySpawnDrop(pos.clone(), wildlifeKindAt(index) === 'spider' ? 'spider' : 'bear');
+}
+
+/** Returns true if the mob died. */
+function damageStartingWildlife(index: number, amount: number): boolean {
+  if (index < 0 || index >= STARTING_WILDLIFE_COUNT) return false;
+  const npc = wildlifeNpcs[index];
+  if (!npc.alive || !npc.attackable) return false;
+  hitMarkers.createPlayerHitMarker(npc.position.clone(), amount);
+  npc.health = Math.max(0, npc.health - amount);
+  if (npc.health <= 0) {
+    addXp(wildlifeKindAt(index) === 'spider' ? XP_SPIDER : XP_BEAR);
+    spawnStartingWildlifeLoot(index, npc.position.clone());
+    npc.alive = false;
+    npc.lurchStartGameTime = -1;
+    const mob = startingWildlifeGroup.children[index] as THREE.Group;
+    if (mob) mob.position.y = -1000;
+    if (
+      attackTarget !== null &&
+      attackTarget.type === 'starting_wildlife' &&
+      attackTarget.index === index
+    ) {
+      attackTarget = null;
+    }
+    return true;
+  }
+  return false;
+}
+
+// Grunts path on the game tick toward the player; mesh lerps within each tick (see TickClock).
 const ENEMY_EXPLOSION_RADIUS = 2.2;      // explosion damages player within this radius
 const ENEMY_EXPLOSION_RANGE = ENEMY_EXPLOSION_RADIUS * 0.8; // stop moving when within 80% of attack radius
 const ENEMY_EXPLOSION_DELAY = 0.9;       // seconds standing still before exploding
@@ -1550,11 +3149,11 @@ const CASTER_COLLISION_RADIUS = CASTER_SIZE / 2;
 const RESURRECTOR_COLLISION_RADIUS = RESURRECTOR_SIZE / 2;
 const COLLISION_PUSH_STRENGTH = 8.0; // How strongly entities push each other apart
 
-// Separation so enemies don't stack
-const ENEMY_SEPARATION_RADIUS = 1.4;
-const ENEMY_SEPARATION_STRENGTH = 2.5;
 const enemyPositions = Array.from({ length: ENEMY_COUNT }, () => new THREE.Vector3());
-const separationVec = new THREE.Vector3();
+/** Grunts: authoritative tile for gameplay; mesh lerps between visFrom → visTo each tick. */
+const enemyLogicalTile: GridTile[] = Array.from({ length: ENEMY_COUNT }, () => ({ x: 0, z: 0 }));
+const enemyVisFrom: { x: number; z: number }[] = Array.from({ length: ENEMY_COUNT }, () => ({ x: 0, z: 0 }));
+const enemyVisTo: { x: number; z: number }[] = Array.from({ length: ENEMY_COUNT }, () => ({ x: 0, z: 0 }));
 const collisionPushVec = new THREE.Vector3();
 
 // Wave system: composition and spawn positions in Waves.ts; clear/spawn via callback
@@ -1565,7 +3164,7 @@ const waves = createWaves({
   onStartWave(wave, composition, getSpawnPosition) {
     const { grunts, casters, resurrectors, teleporters } = composition;
     attackTarget = null;
-    moveTarget = null;
+    clearTileMovement();
 
     for (let j = 0; j < ENEMY_COUNT; j++) killEnemyInstance(enemies, j);
     for (let c = 0; c < CASTER_COUNT; c++) {
@@ -1578,14 +3177,23 @@ const waves = createWaves({
     }
     teleportersApi.clear();
 
-    if (wave >= 1) {
+    const anyNpcs = grunts + casters + resurrectors + teleporters > 0;
+    if (wave >= 1 && anyNpcs) {
       bossApi.spawn();
       addChatMessage('Boss has appeared!');
     }
 
     for (let j = 0; j < grunts; j++) {
       getSpawnPosition(j, waveSpawnOut);
-      tempSpawnPos.set(waveSpawnOut.x, ENEMY_SIZE / 2, waveSpawnOut.z);
+      const gt = worldXZToTile(waveSpawnOut.x, waveSpawnOut.z);
+      enemyLogicalTile[j].x = gt.x;
+      enemyLogicalTile[j].z = gt.z;
+      const gcz = tileCenterXZ(gt);
+      enemyVisFrom[j].x = gcz.x;
+      enemyVisFrom[j].z = gcz.z;
+      enemyVisTo[j].x = gcz.x;
+      enemyVisTo[j].z = gcz.z;
+      tempSpawnPos.set(gcz.x, ENEMY_SIZE / 2, gcz.z);
       resurrectEnemyInstance(enemies, j, tempSpawnPos);
       enemyAlive[j] = true;
       enemyHealth[j] = MAX_ENEMY_HEALTH;
@@ -1598,8 +3206,16 @@ const waves = createWaves({
 
     for (let c = 0; c < casters; c++) {
       getSpawnPosition(100 + c, waveSpawnOut);
-      tempSpawnPos.set(waveSpawnOut.x, CASTER_SIZE / 2, waveSpawnOut.z);
-      casterMeshes[c].position.copy(tempSpawnPos);
+      const ct = worldXZToTile(waveSpawnOut.x, waveSpawnOut.z);
+      casterLogicalTile[c].x = ct.x;
+      casterLogicalTile[c].z = ct.z;
+      const ccz = tileCenterXZ(ct);
+      casterVisFrom[c].x = ccz.x;
+      casterVisFrom[c].z = ccz.z;
+      casterVisTo[c].x = ccz.x;
+      casterVisTo[c].z = ccz.z;
+      casterLogicalPos[c].set(ccz.x, CASTER_SIZE / 2, ccz.z);
+      casterMeshes[c].position.copy(casterLogicalPos[c]);
       casterGroup.add(casterMeshes[c]);
       casterAlive[c] = true;
       casterHealth[c] = MAX_CASTER_HEALTH;
@@ -1609,8 +3225,16 @@ const waves = createWaves({
 
     for (let r = 0; r < resurrectors; r++) {
       getSpawnPosition(200 + r, waveSpawnOut);
-      tempSpawnPos.set(waveSpawnOut.x, RESURRECTOR_SIZE / 2, waveSpawnOut.z);
-      resurrectorMeshes[r].position.copy(tempSpawnPos);
+      const rt = worldXZToTile(waveSpawnOut.x, waveSpawnOut.z);
+      resurrectorLogicalTile[r].x = rt.x;
+      resurrectorLogicalTile[r].z = rt.z;
+      const rcz = tileCenterXZ(rt);
+      resurrectorVisFrom[r].x = rcz.x;
+      resurrectorVisFrom[r].z = rcz.z;
+      resurrectorVisTo[r].x = rcz.x;
+      resurrectorVisTo[r].z = rcz.z;
+      resurrectorLogicalPos[r].set(rcz.x, RESURRECTOR_SIZE / 2, rcz.z);
+      resurrectorMeshes[r].position.copy(resurrectorLogicalPos[r]);
       resurrectorGroup.add(resurrectorMeshes[r]);
       resurrectorAlive[r] = true;
       resurrectorHealth[r] = MAX_RESURRECTOR_HEALTH;
@@ -1637,18 +3261,26 @@ function buildCombatState(): CombatState {
   return {
     enemyPositions,
     enemyAlive,
-    casterPositions: casterMeshes.map((m) => m.position),
+    casterPositions: casterLogicalPos,
     casterAlive,
-    resurrectorPositions: resurrectorMeshes.map((m) => m.position),
+    resurrectorPositions: resurrectorLogicalPos,
     resurrectorAlive,
     teleporterPositions: teleportersApi.getPositions(),
     teleporterAlive: teleportersApi.getAlive(),
     bossPosition: bossApi.getPosition(),
     bossAlive: bossApi.isAlive(),
+    penRatPositions: penRatNpcs.map((n) => n.position),
+    penRatAlive: penRatNpcs.map((n) => n.alive),
+    penRatAttackable: penRatNpcs.map((n) => n.attackable),
+    wildlifePositions: wildlifeNpcs.map((n) => n.position),
+    wildlifeAlive: wildlifeNpcs.map((n) => n.alive),
+    wildlifeAttackable: wildlifeNpcs.map((n) => n.attackable),
+    wildlifeHitRadius: wildlifeNpcs.map((n) => n.collisionRadius),
     enemySize: ENEMY_SIZE,
     casterSize: CASTER_SIZE,
     resurrectorSize: RESURRECTOR_SIZE,
     teleporterSize: TELEPORTER_SIZE,
+    penRatSize: PEN_RAT_SIZE,
     bossHitboxRadius: bossApi.getHitboxRadius(),
   };
 }
@@ -1659,6 +3291,8 @@ const combatCallbacks = {
   damageResurrector,
   damageTeleporter: (t: number, amount: number) => teleportersApi.damage(t, amount),
   damageBoss: (amount: number) => bossApi.damage(amount),
+  damagePenRat: damagePenRat,
+  damageWildlife: damageStartingWildlife,
 };
 
 const swordApi = createSword(scene, character, {
@@ -1672,7 +3306,31 @@ const swordApi = createSword(scene, character, {
   enemyCount: ENEMY_COUNT,
   casterCount: CASTER_COUNT,
   resurrectorCount: RESURRECTOR_COUNT,
+  penRatCount: PEN_RAT_COUNT,
+  wildlifeCount: STARTING_WILDLIFE_COUNT,
 }, combatCallbacks);
+
+function rollTrainingDummyMeleeDamage(): number {
+  const maxHit = Math.max(1, getMeleeDamage());
+  return 1 + Math.floor(Math.random() * maxHit);
+}
+
+function damageTrainingDummy(amount: number): void {
+  if (!trainingDummyAlive) return;
+  hitMarkers.createPlayerHitMarker(trainingDummyWorldPos.clone(), amount);
+  trainingDummyHealth = Math.max(0, trainingDummyHealth - amount);
+  if (trainingDummyHealth <= 0) {
+    trainingDummyAlive = false;
+    trainingDummyGroup.visible = false;
+    if (attackTarget !== null && attackTarget.type === 'training_dummy') attackTarget = null;
+  }
+}
+
+function performTrainingDummyMelee(gameTime: number, targetDir: THREE.Vector3): void {
+  swordApi.startMeleeSwing(gameTime);
+  character.rotation.y = Math.atan2(targetDir.x, targetDir.z);
+  damageTrainingDummy(rollTrainingDummyMeleeDamage());
+}
 
 const EXPLOSION_HIT_RADIUS_BASE = CONST_FIREBALL_RADIUS * CONST_EXPLOSION_MAX_SCALE;
 const EXPLOSION_HIT_RADIUS_INFERNO = EXPLOSION_HIT_RADIUS_BASE * 1.5;
@@ -1797,7 +3455,7 @@ bossApi = createBoss(scene, {
     playerBurnStartTime = gameTime;
     lastBurnTickTime = gameTime;
   },
-  onCreateHitMarker: createHitMarker,
+  onCreateHitMarker: hitMarkers.createPlayerHitMarker,
   onDeath: (position) => {
     addXp(XP_BOSS);
     trySpawnDrop(position, 'resurrector');
@@ -1808,7 +3466,7 @@ bossApi = createBoss(scene, {
 });
 
 teleportersApi = createTeleporters(scene, {
-  onCreateHitMarker: createHitMarker,
+  onCreateHitMarker: hitMarkers.createPlayerHitMarker,
   onDeath: (_index, position) => {
     addXp(XP_TELEPORTER);
     trySpawnDrop(position, 'teleporter');
@@ -1818,20 +3476,61 @@ teleportersApi = createTeleporters(scene, {
   },
 });
 
-// Fireball: right-click spawns via combat/Projectiles
-clickOverlay.addEventListener('contextmenu', (e) => {
-  if (isDead || isPaused || !isSkillUnlocked('fireball') || mana < FIREBALL_MANA_COST) return;
-  const rect = canvas.getBoundingClientRect();
-  pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-  pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-  raycaster.setFromCamera(pointer, isoCamera.three);
-  const hits = raycaster.intersectObject(terrain);
-  if (hits.length > 0) {
-    setMana(mana - FIREBALL_MANA_COST);
-    const target = hits[0].point.clone();
-    target.y = 0;
-    fireballsApi.spawn(character.position, target);
+const minimap = createMinimap(container);
+
+function collectMinimapNpcYellow(): { x: number; z: number }[] {
+  const out: { x: number; z: number }[] = [];
+  for (const pr of penRatNpcs) {
+    if (pr.alive) out.push({ x: pr.position.x, z: pr.position.z });
   }
+  for (const w of wildlifeNpcs) {
+    if (w.alive) out.push({ x: w.position.x, z: w.position.z });
+  }
+  if (trainingDummyAlive) {
+    out.push({ x: trainingDummyWorldPos.x, z: trainingDummyWorldPos.z });
+  }
+  for (let j = 0; j < ENEMY_COUNT; j++) {
+    if (enemyAlive[j]) out.push({ x: enemyPositions[j].x, z: enemyPositions[j].z });
+  }
+  for (let c = 0; c < CASTER_COUNT; c++) {
+    if (casterAlive[c]) out.push({ x: casterLogicalPos[c].x, z: casterLogicalPos[c].z });
+  }
+  for (let r = 0; r < RESURRECTOR_COUNT; r++) {
+    if (resurrectorAlive[r]) out.push({ x: resurrectorLogicalPos[r].x, z: resurrectorLogicalPos[r].z });
+  }
+  const tp = teleportersApi.getPositions();
+  const ta = teleportersApi.getAlive();
+  for (let t = 0; t < TELEPORTER_COUNT; t++) {
+    if (ta[t]) out.push({ x: tp[t]!.x, z: tp[t]!.z });
+  }
+  if (bossApi.isAlive()) {
+    const bp = bossApi.getPosition();
+    out.push({ x: bp.x, z: bp.z });
+  }
+  return out;
+}
+
+// Shift+right-click: fireball. Plain right-click: game context menu.
+clickOverlay.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  if (
+    e.shiftKey &&
+    !isDead &&
+    !isPaused &&
+    isSkillUnlocked('fireball') &&
+    mana >= FIREBALL_MANA_COST
+  ) {
+    setRayFromCanvasClient(e.clientX, e.clientY);
+    const hits = raycaster.intersectObject(terrainRoot, true);
+    if (hits.length > 0) {
+      setMana(mana - FIREBALL_MANA_COST);
+      const target = hits[0].point.clone();
+      target.y = 0;
+      fireballsApi.spawn(character.position, target);
+    }
+    return;
+  }
+  openGameContextMenu(e.clientX, e.clientY);
 });
 
 // Throw skill: rock projectiles (Q key, toward cursor)
@@ -1839,8 +3538,8 @@ function throwRock(gameTime: number): void {
   if (!isSkillUnlocked('rock')) return;
   if (gameTime - lastRangedAttackTime < getRockCooldown()) return;
   lastRangedAttackTime = gameTime;
-  raycaster.setFromCamera(pointer, isoCamera.three);
-  const hits = raycaster.intersectObject(terrain);
+  raycaster.setFromCamera(pointer, followCamera.three);
+  const hits = raycaster.intersectObject(terrainRoot, true);
   if (hits.length === 0) return;
   const target = hits[0].point.clone();
   target.y = 0;
@@ -1855,11 +3554,21 @@ function throwRock(gameTime: number): void {
 }
 
 document.addEventListener('keydown', (e) => {
+  if (e.key === 'F4') {
+    e.preventDefault();
+    terrainEditPanel.toggle();
+    if (terrainEditPanel.isOpen()) terrainEditPanel.refreshPalette();
+    return;
+  }
   if (e.key === 'p' || e.key === 'P' || e.key === 'Escape') {
     e.preventDefault();
+    if (e.key === 'Escape' && terrainEditPanel.isOpen()) {
+      terrainEditPanel.setOpen(false);
+      return;
+    }
     if (!isDead) setPaused(!isPaused);
     if (skillTreeOpen) setSkillTreeOpen(false);
-    if (inventoryOpen) setInventoryOpen(false);
+    if (gameMenuOpen) setGameMenuOpen(false);
     return;
   }
   if (e.key === 'k' || e.key === 'K') {
@@ -1873,10 +3582,10 @@ document.addEventListener('keydown', (e) => {
   }
   if (e.key === 'i' || e.key === 'I') {
     e.preventDefault();
-    if (inventoryOpen) {
-      setInventoryOpen(false);
+    if (gameMenuOpen) {
+      setGameMenuOpen(false);
     } else if (!isDead && !isPaused) {
-      setInventoryOpen(true);
+      setGameMenuOpen(true);
     }
     return;
   }
@@ -1903,103 +3612,32 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-function updateCasters(dt: number, gameTime: number): void {
+function reviveGruntFromCorpse(enemyIndex: number, corpseWorld: THREE.Vector3): void {
+  const gt = worldXZToTile(corpseWorld.x, corpseWorld.z);
+  enemyLogicalTile[enemyIndex].x = gt.x;
+  enemyLogicalTile[enemyIndex].z = gt.z;
+  const gcz = tileCenterXZ(gt);
+  enemyVisFrom[enemyIndex].x = gcz.x;
+  enemyVisFrom[enemyIndex].z = gcz.z;
+  enemyVisTo[enemyIndex].x = gcz.x;
+  enemyVisTo[enemyIndex].z = gcz.z;
+  enemyPositions[enemyIndex].set(gcz.x, ENEMY_SIZE / 2, gcz.z);
+  resurrectEnemyInstance(enemies, enemyIndex, enemyPositions[enemyIndex]);
+}
+
+function updateCasters(_dt: number, gameTime: number): void {
   const charPos = character.position;
+  const tickAlpha = tickClock.getTickAlpha();
   for (let c = 0; c < CASTER_COUNT; c++) {
     if (!casterAlive[c]) continue;
-    const pos = casterMeshes[c].position;
-    const dx = charPos.x - pos.x;
-    const dz = charPos.z - pos.z;
-    const dist = Math.sqrt(dx * dx + dz * dz);
-    if (dist > 0.02) {
-      const targetDist = CASTER_PREFERRED_RANGE;
-      const moveAmount = CASTER_SPEED * dt;
-      // Only move toward player when beyond preferred range; stand still when within range
-      if (dist > targetDist) {
-        const move = Math.min(moveAmount, dist - targetDist);
-        pos.x += (dx / dist) * move;
-        pos.z += (dz / dist) * move;
-      }
-      // When within range: do not back away
-    }
-    
-    // Collision with player
-    collisionPushVec.set(0, 0, 0);
-    const toPlayer = new THREE.Vector3().subVectors(pos, charPos);
-    const distToPlayer = toPlayer.length();
-    const minDistToPlayer = PLAYER_COLLISION_RADIUS + CASTER_COLLISION_RADIUS;
-    if (distToPlayer < minDistToPlayer && distToPlayer > 0.001) {
-      const overlap = minDistToPlayer - distToPlayer;
-      toPlayer.normalize();
-      collisionPushVec.addScaledVector(toPlayer, overlap * COLLISION_PUSH_STRENGTH);
-    }
-    
-    // Collision with enemies
-    for (let j = 0; j < ENEMY_COUNT; j++) {
-      if (!enemyAlive[j]) continue;
-      const toEnemy = new THREE.Vector3().subVectors(pos, enemyPositions[j]);
-      const d = toEnemy.length();
-      const minDist = CASTER_COLLISION_RADIUS + ENEMY_COLLISION_RADIUS;
-      if (d < minDist && d > 0.001) {
-        const overlap = minDist - d;
-        toEnemy.normalize();
-        collisionPushVec.addScaledVector(toEnemy, overlap * COLLISION_PUSH_STRENGTH);
-      }
-    }
-    
-    // Collision with other casters
-    for (let c2 = 0; c2 < CASTER_COUNT; c2++) {
-      if (c2 === c || !casterAlive[c2]) continue;
-      const casterPos = casterMeshes[c2].position;
-      const toCaster = new THREE.Vector3().subVectors(pos, casterPos);
-      const d = toCaster.length();
-      const minDist = CASTER_COLLISION_RADIUS * 2;
-      if (d < minDist && d > 0.001) {
-        const overlap = minDist - d;
-        toCaster.normalize();
-        collisionPushVec.addScaledVector(toCaster, overlap * COLLISION_PUSH_STRENGTH);
-      }
-    }
-    
-    // Collision with resurrectors
-    for (let r = 0; r < RESURRECTOR_COUNT; r++) {
-      if (!resurrectorAlive[r]) continue;
-      const resPos = resurrectorMeshes[r].position;
-      const toRes = new THREE.Vector3().subVectors(pos, resPos);
-      const d = toRes.length();
-      const minDist = CASTER_COLLISION_RADIUS + RESURRECTOR_COLLISION_RADIUS;
-      if (d < minDist && d > 0.001) {
-        const overlap = minDist - d;
-        toRes.normalize();
-        collisionPushVec.addScaledVector(toRes, overlap * COLLISION_PUSH_STRENGTH);
-      }
-    }
-    
-    // Collision with boss
-    if (bossApi.isAlive()) {
-      const toBoss = new THREE.Vector3().subVectors(pos, bossApi.getPosition());
-      const dist = toBoss.length();
-      const minDist = CASTER_COLLISION_RADIUS + bossApi.getHitboxRadius();
-      if (dist < minDist && dist > 0.001) {
-        const overlap = minDist - dist;
-        toBoss.normalize();
-        collisionPushVec.addScaledVector(toBoss, overlap * COLLISION_PUSH_STRENGTH);
-      }
-    }
-    
-    // Apply collision push
-    if (collisionPushVec.lengthSq() > 0.0001) {
-      pos.addScaledVector(collisionPushVec, dt);
-    }
-    
-    pos.y = CASTER_SIZE / 2;
+    const pos = casterLogicalPos[c];
 
     if (gameTime - lastCasterResurrectTime[c] >= RESURRECT_COOLDOWN && bodies.length > 0) {
       let nearestIdx = -1;
       let nearestDist = RESURRECT_RANGE;
       for (let b = 0; b < bodies.length; b++) {
         const body = bodies[b];
-        if (body.enemyIndex >= waves.getLevelGruntsCount()) continue; // only resurrect grunts that are in play this level
+        if (body.enemyIndex >= waves.getLevelGruntsCount()) continue;
         const d = pos.distanceTo(body.position);
         if (d < nearestDist) {
           nearestDist = d;
@@ -2008,8 +3646,7 @@ function updateCasters(dt: number, gameTime: number): void {
       }
       if (nearestIdx >= 0) {
         const body = bodies[nearestIdx];
-        resurrectEnemyInstance(enemies, body.enemyIndex, body.position);
-        enemyPositions[body.enemyIndex].copy(body.position);
+        reviveGruntFromCorpse(body.enemyIndex, body.position);
         enemyHealth[body.enemyIndex] = MAX_ENEMY_HEALTH;
         enemyAlive[body.enemyIndex] = true;
         enemyExplosionState[body.enemyIndex] = 'moving';
@@ -2036,101 +3673,18 @@ function updateCasters(dt: number, gameTime: number): void {
         ttl: ENEMY_FIREBALL_TTL,
       });
     }
+
+    const vx = THREE.MathUtils.lerp(casterVisFrom[c].x, casterVisTo[c].x, tickAlpha);
+    const vz = THREE.MathUtils.lerp(casterVisFrom[c].z, casterVisTo[c].z, tickAlpha);
+    casterMeshes[c].position.set(vx, CASTER_SIZE / 2, vz);
   }
 }
 
-function updateResurrectors(dt: number, gameTime: number): void {
-  const charPos = character.position;
+function updateResurrectors(_dt: number, gameTime: number): void {
+  const tickAlpha = tickClock.getTickAlpha();
   for (let r = 0; r < RESURRECTOR_COUNT; r++) {
     if (!resurrectorAlive[r]) continue;
-    const pos = resurrectorMeshes[r].position;
-    const dx = charPos.x - pos.x;
-    const dz = charPos.z - pos.z;
-    const dist = Math.sqrt(dx * dx + dz * dz);
-    if (dist > 0.02) {
-      const targetDist = RESURRECTOR_PREFERRED_RANGE;
-      const moveAmount = RESURRECTOR_SPEED * dt;
-      if (dist > targetDist) {
-        const move = Math.min(moveAmount, dist - targetDist);
-        pos.x += (dx / dist) * move;
-        pos.z += (dz / dist) * move;
-      } else if (dist < targetDist) {
-        const move = Math.min(moveAmount, targetDist - dist);
-        pos.x -= (dx / dist) * move;
-        pos.z -= (dz / dist) * move;
-      }
-    }
-    
-    // Collision with player
-    collisionPushVec.set(0, 0, 0);
-    const toPlayer = new THREE.Vector3().subVectors(pos, charPos);
-    const distToPlayer = toPlayer.length();
-    const minDistToPlayer = PLAYER_COLLISION_RADIUS + RESURRECTOR_COLLISION_RADIUS;
-    if (distToPlayer < minDistToPlayer && distToPlayer > 0.001) {
-      const overlap = minDistToPlayer - distToPlayer;
-      toPlayer.normalize();
-      collisionPushVec.addScaledVector(toPlayer, overlap * COLLISION_PUSH_STRENGTH);
-    }
-    
-    // Collision with enemies
-    for (let j = 0; j < ENEMY_COUNT; j++) {
-      if (!enemyAlive[j]) continue;
-      const toEnemy = new THREE.Vector3().subVectors(pos, enemyPositions[j]);
-      const d = toEnemy.length();
-      const minDist = RESURRECTOR_COLLISION_RADIUS + ENEMY_COLLISION_RADIUS;
-      if (d < minDist && d > 0.001) {
-        const overlap = minDist - d;
-        toEnemy.normalize();
-        collisionPushVec.addScaledVector(toEnemy, overlap * COLLISION_PUSH_STRENGTH);
-      }
-    }
-    
-    // Collision with casters
-    for (let c = 0; c < CASTER_COUNT; c++) {
-      if (!casterAlive[c]) continue;
-      const casterPos = casterMeshes[c].position;
-      const toCaster = new THREE.Vector3().subVectors(pos, casterPos);
-      const d = toCaster.length();
-      const minDist = RESURRECTOR_COLLISION_RADIUS + CASTER_COLLISION_RADIUS;
-      if (d < minDist && d > 0.001) {
-        const overlap = minDist - d;
-        toCaster.normalize();
-        collisionPushVec.addScaledVector(toCaster, overlap * COLLISION_PUSH_STRENGTH);
-      }
-    }
-    
-    // Collision with other resurrectors
-    for (let r2 = 0; r2 < RESURRECTOR_COUNT; r2++) {
-      if (r2 === r || !resurrectorAlive[r2]) continue;
-      const resPos = resurrectorMeshes[r2].position;
-      const toRes = new THREE.Vector3().subVectors(pos, resPos);
-      const d = toRes.length();
-      const minDist = RESURRECTOR_COLLISION_RADIUS * 2;
-      if (d < minDist && d > 0.001) {
-        const overlap = minDist - d;
-        toRes.normalize();
-        collisionPushVec.addScaledVector(toRes, overlap * COLLISION_PUSH_STRENGTH);
-      }
-    }
-    
-    // Collision with boss
-    if (bossApi.isAlive()) {
-      const toBoss = new THREE.Vector3().subVectors(pos, bossApi.getPosition());
-      const dist = toBoss.length();
-      const minDist = RESURRECTOR_COLLISION_RADIUS + bossApi.getHitboxRadius();
-      if (dist < minDist && dist > 0.001) {
-        const overlap = minDist - dist;
-        toBoss.normalize();
-        collisionPushVec.addScaledVector(toBoss, overlap * COLLISION_PUSH_STRENGTH);
-      }
-    }
-    
-    // Apply collision push
-    if (collisionPushVec.lengthSq() > 0.0001) {
-      pos.addScaledVector(collisionPushVec, dt);
-    }
-    
-    pos.y = RESURRECTOR_SIZE / 2;
+    const pos = resurrectorLogicalPos[r];
 
     if (gameTime - lastResurrectorResurrectTime[r] >= RESURRECT_COOLDOWN && bodies.length > 0) {
       let nearestIdx = -1;
@@ -2146,8 +3700,7 @@ function updateResurrectors(dt: number, gameTime: number): void {
       }
       if (nearestIdx >= 0) {
         const body = bodies[nearestIdx];
-        resurrectEnemyInstance(enemies, body.enemyIndex, body.position);
-        enemyPositions[body.enemyIndex].copy(body.position);
+        reviveGruntFromCorpse(body.enemyIndex, body.position);
         enemyHealth[body.enemyIndex] = MAX_ENEMY_HEALTH;
         enemyAlive[body.enemyIndex] = true;
         enemyExplosionState[body.enemyIndex] = 'moving';
@@ -2160,7 +3713,406 @@ function updateResurrectors(dt: number, gameTime: number): void {
         lastResurrectorResurrectTime[r] = gameTime;
       }
     }
+
+    const vx = THREE.MathUtils.lerp(resurrectorVisFrom[r].x, resurrectorVisTo[r].x, tickAlpha);
+    const vz = THREE.MathUtils.lerp(resurrectorVisFrom[r].z, resurrectorVisTo[r].z, tickAlpha);
+    resurrectorMeshes[r].position.set(vx, RESURRECTOR_SIZE / 2, vz);
   }
+}
+
+function collectAllNpcTileKeys(): Set<number> {
+  const s = new Set<number>();
+  for (let ri = 0; ri < PEN_RAT_COUNT; ri++) {
+    if (!penRatNpcs[ri].alive) continue;
+    s.add(tileKey(penRatNpcs[ri].logicalTile));
+  }
+  for (let wi = 0; wi < STARTING_WILDLIFE_COUNT; wi++) {
+    if (!wildlifeNpcs[wi].alive) continue;
+    s.add(tileKey(wildlifeNpcs[wi].logicalTile));
+  }
+  for (let j = 0; j < ENEMY_COUNT; j++) {
+    if (!enemyAlive[j]) continue;
+    s.add(tileKey(enemyLogicalTile[j]));
+  }
+  for (let c = 0; c < CASTER_COUNT; c++) {
+    if (!casterAlive[c]) continue;
+    s.add(tileKey(casterLogicalTile[c]));
+  }
+  for (let r = 0; r < RESURRECTOR_COUNT; r++) {
+    if (!resurrectorAlive[r]) continue;
+    s.add(tileKey(resurrectorLogicalTile[r]));
+  }
+  return s;
+}
+
+/** One OSRS-style server tick: NPC logical tiles update; visuals catch up via lerp until the next tick. */
+function processGameTick(): void {
+  const charPos = character.position;
+  const playerTile = getPlayerPathTile();
+
+  let occupied = collectAllNpcTileKeys();
+  for (let j = 0; j < ENEMY_COUNT; j++) {
+    if (!enemyAlive[j]) continue;
+    const oldTile: GridTile = { x: enemyLogicalTile[j].x, z: enemyLogicalTile[j].z };
+    const pos = enemyPositions[j];
+    const dx = charPos.x - pos.x;
+    const dz = charPos.z - pos.z;
+    const dist = Math.sqrt(dx * dx + dz * dz);
+    const inRange = dist <= ENEMY_EXPLOSION_RANGE;
+
+    let newTile = oldTile;
+    const ok = tileKey(oldTile);
+    occupied.delete(ok);
+    if (!inRange && enemyExplosionState[j] === 'moving') {
+      const cand = nextTileTowardGoal(oldTile, playerTile);
+      if (cand && !occupied.has(tileKey(cand))) {
+        newTile = cand;
+        occupied.add(tileKey(cand));
+      } else {
+        occupied.add(ok);
+      }
+    } else {
+      occupied.add(ok);
+    }
+    enemyLogicalTile[j].x = newTile.x;
+    enemyLogicalTile[j].z = newTile.z;
+    const o = tileCenterXZ(oldTile);
+    const n = tileCenterXZ(newTile);
+    enemyVisFrom[j].x = o.x;
+    enemyVisFrom[j].z = o.z;
+    enemyVisTo[j].x = n.x;
+    enemyVisTo[j].z = n.z;
+    pos.set(n.x, ENEMY_SIZE / 2, n.z);
+  }
+
+  occupied = collectAllNpcTileKeys();
+  for (let c = 0; c < CASTER_COUNT; c++) {
+    if (!casterAlive[c]) continue;
+    const oldTile: GridTile = { x: casterLogicalTile[c].x, z: casterLogicalTile[c].z };
+    const ok = tileKey(oldTile);
+    occupied.delete(ok);
+    const lpos = casterLogicalPos[c];
+    const dx = charPos.x - lpos.x;
+    const dz = charPos.z - lpos.z;
+    const dist = Math.sqrt(dx * dx + dz * dz);
+    const ring = CASTER_PREFERRED_RANGE;
+    let cand: GridTile | null = null;
+    if (dist > ring + 0.45) cand = nextTileTowardGoal(oldTile, playerTile);
+    else if (dist < ring - 0.45) cand = pickGreedyStepAway(oldTile, playerTile);
+
+    let newTile = oldTile;
+    if (cand && !occupied.has(tileKey(cand))) {
+      newTile = cand;
+      occupied.add(tileKey(cand));
+    } else {
+      occupied.add(tileKey(oldTile));
+    }
+    casterLogicalTile[c].x = newTile.x;
+    casterLogicalTile[c].z = newTile.z;
+    const nc = tileCenterXZ(newTile);
+    lpos.set(nc.x, CASTER_SIZE / 2, nc.z);
+    const o = tileCenterXZ(oldTile);
+    casterVisFrom[c].x = o.x;
+    casterVisFrom[c].z = o.z;
+    casterVisTo[c].x = nc.x;
+    casterVisTo[c].z = nc.z;
+  }
+
+  occupied = collectAllNpcTileKeys();
+  for (let r = 0; r < RESURRECTOR_COUNT; r++) {
+    if (!resurrectorAlive[r]) continue;
+    const oldTile: GridTile = { x: resurrectorLogicalTile[r].x, z: resurrectorLogicalTile[r].z };
+    const ok = tileKey(oldTile);
+    occupied.delete(ok);
+    const lpos = resurrectorLogicalPos[r];
+    const dx = charPos.x - lpos.x;
+    const dz = charPos.z - lpos.z;
+    const dist = Math.sqrt(dx * dx + dz * dz);
+    const ring = RESURRECTOR_PREFERRED_RANGE;
+    let cand: GridTile | null = null;
+    if (dist > ring + 0.45) cand = nextTileTowardGoal(oldTile, playerTile);
+    else if (dist < ring - 0.45) cand = pickGreedyStepAway(oldTile, playerTile);
+
+    let newTile = oldTile;
+    if (cand && !occupied.has(tileKey(cand))) {
+      newTile = cand;
+      occupied.add(tileKey(cand));
+    } else {
+      occupied.add(tileKey(oldTile));
+    }
+    resurrectorLogicalTile[r].x = newTile.x;
+    resurrectorLogicalTile[r].z = newTile.z;
+    const nc = tileCenterXZ(newTile);
+    lpos.set(nc.x, RESURRECTOR_SIZE / 2, nc.z);
+    const o = tileCenterXZ(oldTile);
+    resurrectorVisFrom[r].x = o.x;
+    resurrectorVisFrom[r].z = o.z;
+    resurrectorVisTo[r].x = nc.x;
+    resurrectorVisTo[r].z = nc.z;
+  }
+
+  occupied = collectAllNpcTileKeys();
+  const PEN_RAT_CHASE_RANGE = TILE_SIZE * 12;
+  const NPC_IDLE_WANDER_CHANCE = 0.32;
+  for (let ri = 0; ri < PEN_RAT_COUNT; ri++) {
+    const ratNpc = penRatNpcs[ri];
+    if (!ratNpc.alive) continue;
+    const oldTile: GridTile = { x: ratNpc.logicalTile.x, z: ratNpc.logicalTile.z };
+    const ok = tileKey(oldTile);
+    occupied.delete(ok);
+    const pos = ratNpc.position;
+    const rdx = charPos.x - pos.x;
+    const rdz = charPos.z - pos.z;
+    const rdist = Math.sqrt(rdx * rdx + rdz * rdz);
+    let newRTile = oldTile;
+    const chasing = ratNpc.aggressive && rdist < PEN_RAT_CHASE_RANGE;
+    if (chasing) {
+      // OSRS-style: path onto a tile orthogonally adjacent to the player, never onto the player's tile.
+      if (areOrthogonallyAdjacent(oldTile, playerTile)) {
+        occupied.add(ok);
+      } else {
+        const approachTile = findClosestReachableOrthAdjacentTile(oldTile, playerTile);
+        if (approachTile !== null) {
+          const rcand = nextTileTowardGoal(oldTile, approachTile);
+          if (rcand && !occupied.has(tileKey(rcand))) {
+            newRTile = rcand;
+            occupied.add(tileKey(rcand));
+          } else {
+            occupied.add(ok);
+          }
+        } else {
+          occupied.add(ok);
+        }
+      }
+    } else {
+      const w = ratNpc.tryIdleWanderStep(oldTile, occupied, Math.random, NPC_IDLE_WANDER_CHANCE);
+      if (w) {
+        newRTile = w;
+        occupied.add(tileKey(w));
+      } else {
+        occupied.add(ok);
+      }
+    }
+    ratNpc.commitTileStep(newRTile, oldTile);
+  }
+
+  occupied = collectAllNpcTileKeys();
+  for (let wi = 0; wi < STARTING_WILDLIFE_COUNT; wi++) {
+    const wildNpc = wildlifeNpcs[wi];
+    if (!wildNpc.alive) continue;
+    const oldTile: GridTile = { x: wildNpc.logicalTile.x, z: wildNpc.logicalTile.z };
+    const ok = tileKey(oldTile);
+    occupied.delete(ok);
+    let newRTile = oldTile;
+    const wildlifeAggroDist = Math.max(
+      Math.abs(oldTile.x - playerTile.x),
+      Math.abs(oldTile.z - playerTile.z)
+    );
+    const wildlifeChasing =
+      wildNpc.aggressive && wildlifeAggroDist <= STARTING_WILDLIFE_AGGRO_TILES;
+    if (wildlifeChasing) {
+      if (areOrthogonallyAdjacent(oldTile, playerTile)) {
+        occupied.add(ok);
+      } else {
+        const approachTile = findClosestReachableOrthAdjacentTile(oldTile, playerTile);
+        if (approachTile !== null) {
+          const rcand = nextTileTowardGoal(oldTile, approachTile);
+          if (rcand && !occupied.has(tileKey(rcand))) {
+            newRTile = rcand;
+            occupied.add(tileKey(rcand));
+          } else {
+            occupied.add(ok);
+          }
+        } else {
+          occupied.add(ok);
+        }
+      }
+    } else {
+      const w = wildNpc.tryIdleWanderStep(oldTile, occupied, Math.random, NPC_IDLE_WANDER_CHANCE);
+      if (w) {
+        newRTile = w;
+        occupied.add(tileKey(w));
+      } else {
+        occupied.add(ok);
+      }
+    }
+    wildNpc.commitTileStep(newRTile, oldTile);
+  }
+
+  processPlayerPathTick();
+
+  if (
+    attackTarget !== null &&
+    attackTarget.type === 'training_dummy' &&
+    trainingDummyAlive &&
+    isAtTrainingDummyMeleeStand()
+  ) {
+    if (trainingDummyMeleeTickCounter < 0) {
+      pendingTrainingDummyMeleeSwings++;
+      trainingDummyMeleeTickCounter = 0;
+    } else {
+      trainingDummyMeleeTickCounter++;
+      if (trainingDummyMeleeTickCounter >= 3) {
+        trainingDummyMeleeTickCounter = 0;
+        pendingTrainingDummyMeleeSwings++;
+      }
+    }
+  } else {
+    trainingDummyMeleeTickCounter = -1;
+  }
+
+  if (gatheringTargetNodeIndex !== null && !isDead && !isPaused) {
+    const def = GATHERING_NODE_DEFINITIONS[gatheringTargetNodeIndex];
+    if (def && areOrthogonallyAdjacent(getPlayerPathTile(), def.tile)) {
+      gatherHarvestTickCounter++;
+      if (gatherHarvestTickCounter >= GATHERING_HARVEST_TICK_INTERVAL) {
+        gatherHarvestTickCounter = 0;
+        if (Math.random() < GATHERING_SUCCESS_CHANCE) {
+          const item = pickGatheringReward(def.kind);
+          if (inventory.addItem(item)) {
+            playerSkills.addXp(def.kind, GATHERING_SUCCESS_SKILL_XP);
+            addChatMessage(`You manage to gather some ${getItemDef(item).name}.`);
+          } else {
+            addChatMessage('Your inventory is too full to hold anything else.');
+          }
+        } else {
+          addChatMessage('You fail to gather anything useful.');
+        }
+      }
+    } else {
+      gatherHarvestTickCounter = 0;
+    }
+  } else {
+    gatherHarvestTickCounter = 0;
+  }
+
+  if (!isDead && !isPaused) {
+    const ptBite = getPlayerPathTile();
+    for (let ri = 0; ri < PEN_RAT_COUNT; ri++) {
+      const ratNpc = penRatNpcs[ri];
+      if (!ratNpc.alive || !ratNpc.aggressive) continue;
+      if (areOrthogonallyAdjacent(ptBite, ratNpc.logicalTile)) {
+        ratNpc.biteTick++;
+        if (ratNpc.biteTick >= ratNpc.biteIntervalTicks) {
+          ratNpc.resetBiteAccumulator();
+          if (!isDamageBlocked('melee')) {
+            setHealth(health - ratNpc.biteDamage);
+          }
+          ratNpc.lurchStartGameTime = gameTime;
+        }
+      } else {
+        ratNpc.resetBiteAccumulator();
+      }
+    }
+
+    for (let wi = 0; wi < STARTING_WILDLIFE_COUNT; wi++) {
+      const wildNpc = wildlifeNpcs[wi];
+      if (!wildNpc.alive || !wildNpc.aggressive) continue;
+      const wildTile = wildNpc.logicalTile;
+      const biteDist = Math.max(Math.abs(ptBite.x - wildTile.x), Math.abs(ptBite.z - wildTile.z));
+      if (
+        biteDist <= STARTING_WILDLIFE_AGGRO_TILES &&
+        areOrthogonallyAdjacent(ptBite, wildTile)
+      ) {
+        wildNpc.biteTick++;
+        if (wildNpc.biteTick >= wildNpc.biteIntervalTicks) {
+          wildNpc.resetBiteAccumulator();
+          if (!isDamageBlocked('melee')) {
+            setHealth(health - wildNpc.biteDamage);
+          }
+          wildNpc.lurchStartGameTime = gameTime;
+        }
+      } else {
+        wildNpc.resetBiteAccumulator();
+      }
+    }
+  }
+}
+
+const tickClock = new TickClock();
+
+const multiplayerUrlRaw =
+  typeof import.meta.env.VITE_MULTIPLAYER_URL === 'string' ? import.meta.env.VITE_MULTIPLAYER_URL.trim() : '';
+/** In dev, default to local server so a second tab works without a .env file. */
+const multiplayerUrl =
+  multiplayerUrlRaw ||
+  (import.meta.env.DEV ? `ws://${typeof location !== 'undefined' ? location.hostname : 'localhost'}:3850` : '');
+
+const spacetimeUriRaw =
+  typeof import.meta.env.VITE_SPACETIMEDB_URI === 'string' ? import.meta.env.VITE_SPACETIMEDB_URI.trim() : '';
+const spacetimeModuleRaw =
+  typeof import.meta.env.VITE_SPACETIMEDB_MODULE === 'string'
+    ? import.meta.env.VITE_SPACETIMEDB_MODULE.trim()
+    : 'aidans-game';
+
+let remotePlayersApi: ReturnType<typeof createRemotePlayers> | null = null;
+let multiplayerFirstSnap = true;
+let lastMultiplayerSentTile: GridTile | null = null;
+let lastMultiplayerSentGoal: GridTile | null = null;
+
+const multiplayerHandlers: MultiplayerHandlers = {
+  onSnap(msg) {
+    if (multiplayerFirstSnap) {
+      multiplayerFirstSnap = false;
+      lastMultiplayerSentTile = null;
+      lastMultiplayerSentGoal = null;
+      character.position.set(msg.self.x, samplePlayerGroundY(msg.self.x, msg.self.z), msg.self.z);
+      snapCharacterXZToNearestWalkable();
+      snapCharacterYToTerrain();
+      clearTileMovement();
+    }
+    remotePlayersApi!.ingestSnap(msg.peers);
+  },
+  onPeerHitSplat(msg) {
+    const v = new THREE.Vector3(msg.x, msg.y, msg.z);
+    hitMarkers.createHitMarker(v, msg.amount, { remotePeer: true });
+  },
+  onTerrainEditFromPeer(msg) {
+    applyTerrainPaintAtTile(
+      chunkTerrainLoader,
+      msg.tx,
+      msg.tz,
+      msg.mode,
+      msg.textureIndex,
+      msg.heightStep,
+      msg.brushRadius
+    );
+  },
+};
+
+if (spacetimeUriRaw.length > 0) {
+  remotePlayersApi = createRemotePlayers();
+  scene.add(remotePlayersApi.group);
+  multiplayerClient = new SpacetimeMultiplayerClient(
+    { uri: spacetimeUriRaw, moduleName: spacetimeModuleRaw },
+    multiplayerHandlers
+  );
+  multiplayerClient.connect();
+} else if (multiplayerUrl.length > 0) {
+  remotePlayersApi = createRemotePlayers();
+  scene.add(remotePlayersApi.group);
+  multiplayerClient = new MultiplayerClient(multiplayerUrl, multiplayerHandlers);
+  multiplayerClient.connect();
+}
+
+/** Push path tile + move goal when either changes; pairs with immediate server broadcast for low latency. */
+function syncMultiplayerPathTile(): void {
+  if (multiplayerClient === null) return;
+  const t = getPlayerPathTile();
+  const goal: GridTile = moveGoalTile !== null ? moveGoalTile : t;
+  if (
+    lastMultiplayerSentTile !== null &&
+    lastMultiplayerSentGoal !== null &&
+    lastMultiplayerSentTile.x === t.x &&
+    lastMultiplayerSentTile.z === t.z &&
+    lastMultiplayerSentGoal.x === goal.x &&
+    lastMultiplayerSentGoal.z === goal.z
+  ) {
+    return;
+  }
+  lastMultiplayerSentTile = { x: t.x, z: t.z };
+  lastMultiplayerSentGoal = { x: goal.x, z: goal.z };
+  multiplayerClient.sendMove(t.x, t.z, goal.x, goal.z);
 }
 
 function updateEnemyFireballs(dt: number): void {
@@ -2189,10 +4141,10 @@ function updateEnemyFireballs(dt: number): void {
   }
 }
 
-function updateEnemies(dt: number, gameTime: number): void {
+function updateEnemies(_dt: number, gameTime: number): void {
   const charPos = character.position;
+  const tickAlpha = tickClock.getTickAlpha();
 
-  // Pass 1: move toward character only when outside explosion range and in 'moving' state
   for (let j = 0; j < ENEMY_COUNT; j++) {
     if (!enemyAlive[j]) continue;
     const pos = enemyPositions[j];
@@ -2216,106 +4168,112 @@ function updateEnemies(dt: number, gameTime: number): void {
             }
           }
         }
-      } else if (enemyExplosionState[j] === 'cooldown' && gameTime - enemyExplosionLastTime[j] >= ENEMY_EXPLOSION_COOLDOWN) {
+      } else if (
+        enemyExplosionState[j] === 'cooldown' &&
+        gameTime - enemyExplosionLastTime[j] >= ENEMY_EXPLOSION_COOLDOWN
+      ) {
         enemyExplosionState[j] = 'charging';
         enemyExplosionChargeStart[j] = gameTime;
       }
     } else {
       enemyExplosionState[j] = 'moving';
-      if (dist > 0.01) {
-        const move = Math.min(ENEMY_SPEED * dt, dist);
-        pos.x += (dx / dist) * move;
-        pos.z += (dz / dist) * move;
-      }
     }
-
-    pos.y = ENEMY_SIZE / 2;
   }
 
-  // Pass 2: separation and collision - push apart from nearby entities
-  for (let j = 0; j < ENEMY_COUNT; j++) {
-    if (!enemyAlive[j]) continue;
-    separationVec.set(0, 0, 0);
-    const pos = enemyPositions[j];
-    
-    // Collision with player
-    const toPlayer = new THREE.Vector3().subVectors(pos, charPos);
-    const distToPlayer = toPlayer.length();
-    const minDistToPlayer = PLAYER_COLLISION_RADIUS + ENEMY_COLLISION_RADIUS;
-    if (distToPlayer < minDistToPlayer && distToPlayer > 0.001) {
-      const overlap = minDistToPlayer - distToPlayer;
-      toPlayer.normalize();
-      separationVec.addScaledVector(toPlayer, overlap * COLLISION_PUSH_STRENGTH);
-    }
-    
-    // Collision with other enemies
-    for (let k = 0; k < ENEMY_COUNT; k++) {
-      if (k === j || !enemyAlive[k]) continue;
-      const d = pos.distanceTo(enemyPositions[k]);
-      const minDist = ENEMY_COLLISION_RADIUS * 2;
-      if (d < minDist && d > 0.001) {
-        const overlap = minDist - d;
-        enemyPosition.copy(pos).sub(enemyPositions[k]).normalize();
-        separationVec.addScaledVector(enemyPosition, overlap * COLLISION_PUSH_STRENGTH);
-      } else if (d < ENEMY_SEPARATION_RADIUS && d > 0.001) {
-        // Soft separation for enemies that are close but not overlapping
-        enemyPosition.copy(pos).sub(enemyPositions[k]).normalize().multiplyScalar(1 - d / ENEMY_SEPARATION_RADIUS);
-        separationVec.add(enemyPosition);
-      }
-    }
-    
-    // Collision with casters
-    for (let c = 0; c < CASTER_COUNT; c++) {
-      if (!casterAlive[c]) continue;
-      const casterPos = casterMeshes[c].position;
-      const toCaster = new THREE.Vector3().subVectors(pos, casterPos);
-      const dist = toCaster.length();
-      const minDist = ENEMY_COLLISION_RADIUS + CASTER_COLLISION_RADIUS;
-      if (dist < minDist && dist > 0.001) {
-        const overlap = minDist - dist;
-        toCaster.normalize();
-        separationVec.addScaledVector(toCaster, overlap * COLLISION_PUSH_STRENGTH);
-      }
-    }
-    
-    // Collision with resurrectors
-    for (let r = 0; r < RESURRECTOR_COUNT; r++) {
-      if (!resurrectorAlive[r]) continue;
-      const resPos = resurrectorMeshes[r].position;
-      const toRes = new THREE.Vector3().subVectors(pos, resPos);
-      const dist = toRes.length();
-      const minDist = ENEMY_COLLISION_RADIUS + RESURRECTOR_COLLISION_RADIUS;
-      if (dist < minDist && dist > 0.001) {
-        const overlap = minDist - dist;
-        toRes.normalize();
-        separationVec.addScaledVector(toRes, overlap * COLLISION_PUSH_STRENGTH);
-      }
-    }
-    
-    // Collision with boss
-    if (bossApi.isAlive()) {
-      const toBoss = new THREE.Vector3().subVectors(pos, bossApi.getPosition());
-      const dist = toBoss.length();
-      const minDist = ENEMY_COLLISION_RADIUS + bossApi.getHitboxRadius();
-      if (dist < minDist && dist > 0.001) {
-        const overlap = minDist - dist;
-        toBoss.normalize();
-        separationVec.addScaledVector(toBoss, overlap * COLLISION_PUSH_STRENGTH);
-      }
-    }
-    
-    enemyPositions[j].addScaledVector(separationVec, dt);
-    enemyPositions[j].y = ENEMY_SIZE / 2;
-  }
-
-  // Pass 3: update enemy positions
   for (let j = 0; j < ENEMY_COUNT; j++) {
     if (!enemyAlive[j]) continue;
     const enemy = enemies.children[j] as THREE.Object3D;
     if (enemy) {
-      // Position sprite at ENEMY_SIZE/2 (sprites are positioned at their center)
-      enemy.position.set(enemyPositions[j].x, ENEMY_SIZE / 2, enemyPositions[j].z);
+      const vx = THREE.MathUtils.lerp(enemyVisFrom[j].x, enemyVisTo[j].x, tickAlpha);
+      const vz = THREE.MathUtils.lerp(enemyVisFrom[j].z, enemyVisTo[j].z, tickAlpha);
+      enemy.position.set(vx, ENEMY_SIZE / 2, vz);
     }
+  }
+}
+
+function updatePenRatVisuals(currentGameTime: number): void {
+  const tickAlpha = tickClock.getTickAlpha();
+  const charX = character.position.x;
+  const charZ = character.position.z;
+  for (let ri = 0; ri < PEN_RAT_COUNT; ri++) {
+    const ratNpc = penRatNpcs[ri];
+    if (!ratNpc.alive) continue;
+    const rat = penRatGroup.children[ri] as THREE.Group;
+    if (!rat) continue;
+    const vx = THREE.MathUtils.lerp(ratNpc.visFrom.x, ratNpc.visTo.x, tickAlpha);
+    const vz = THREE.MathUtils.lerp(ratNpc.visFrom.z, ratNpc.visTo.z, tickAlpha);
+    let px = vx;
+    let py = 0;
+    let pz = vz;
+    const lurchStart = ratNpc.lurchStartGameTime;
+    if (lurchStart >= 0) {
+      const elapsed = currentGameTime - lurchStart;
+      if (elapsed >= PEN_RAT_LURCH_DURATION) {
+        ratNpc.lurchStartGameTime = -1;
+      } else {
+        const t = elapsed / PEN_RAT_LURCH_DURATION;
+        const envelope = Math.sin(Math.PI * t);
+        let dx = charX - vx;
+        let dz = charZ - vz;
+        const dist = Math.hypot(dx, dz);
+        if (dist > 1e-4) {
+          dx /= dist;
+          dz /= dist;
+        } else {
+          dx = 0;
+          dz = 1;
+        }
+        px = vx + dx * PEN_RAT_LURCH_DISTANCE * envelope;
+        pz = vz + dz * PEN_RAT_LURCH_DISTANCE * envelope;
+        py = PEN_RAT_LURCH_HOP_Y * envelope;
+      }
+    }
+    rat.position.set(px, py, pz);
+  }
+}
+
+function updateStartingWildlifeVisuals(currentGameTime: number): void {
+  const tickAlpha = tickClock.getTickAlpha();
+  const charX = character.position.x;
+  const charZ = character.position.z;
+  for (let wi = 0; wi < STARTING_WILDLIFE_COUNT; wi++) {
+    const wildNpc = wildlifeNpcs[wi];
+    if (!wildNpc.alive) continue;
+    const mob = startingWildlifeGroup.children[wi] as THREE.Group;
+    if (!mob) continue;
+    const vx = THREE.MathUtils.lerp(wildNpc.visFrom.x, wildNpc.visTo.x, tickAlpha);
+    const vz = THREE.MathUtils.lerp(wildNpc.visFrom.z, wildNpc.visTo.z, tickAlpha);
+    let px = vx;
+    let py = 0;
+    let pz = vz;
+    const lurchStart = wildNpc.lurchStartGameTime;
+    if (lurchStart >= 0) {
+      const elapsed = currentGameTime - lurchStart;
+      if (elapsed >= PEN_RAT_LURCH_DURATION) {
+        wildNpc.lurchStartGameTime = -1;
+      } else {
+        const t = elapsed / PEN_RAT_LURCH_DURATION;
+        const envelope = Math.sin(Math.PI * t);
+        let dx = charX - vx;
+        let dz = charZ - vz;
+        const dist = Math.hypot(dx, dz);
+        if (dist > 1e-4) {
+          dx /= dist;
+          dz /= dist;
+        } else {
+          dx = 0;
+          dz = 1;
+        }
+        const lurchDist =
+          wildlifeKindAt(wildNpc.slotIndex) === 'bear'
+            ? PEN_RAT_LURCH_DISTANCE * 1.35
+            : PEN_RAT_LURCH_DISTANCE * 0.85;
+        px = vx + dx * lurchDist * envelope;
+        pz = vz + dz * lurchDist * envelope;
+        py = PEN_RAT_LURCH_HOP_Y * (wildlifeKindAt(wildNpc.slotIndex) === 'bear' ? 1.15 : 1) * envelope;
+      }
+    }
+    mob.position.set(px, py, pz);
   }
 }
 
@@ -2332,15 +4290,45 @@ container.appendChild(sizeWarningEl);
 
 const MANA_REGEN_PER_SECOND = 5;
 
+const CAM_ORBIT_SPEED = 2.15;
+const CAM_PITCH_SPEED = 1.05;
+
 const gameLoop = new GameLoop(
   (dt) => {
+    followCamera.setTarget(character.position.x, character.position.y, character.position.z);
+    if (!isPaused && !skillTreeOpen && !gameMenuOpen) {
+      if (cameraKeysHeld.has('a')) followCamera.addOrbitYaw(-CAM_ORBIT_SPEED * dt);
+      if (cameraKeysHeld.has('d')) followCamera.addOrbitYaw(CAM_ORBIT_SPEED * dt);
+      if (cameraKeysHeld.has('w')) followCamera.addPitch(CAM_PITCH_SPEED * dt);
+      if (cameraKeysHeld.has('s')) followCamera.addPitch(-CAM_PITCH_SPEED * dt);
+    }
+
     if (isPaused) return;
     gameTime += dt;
+    chunkTerrainLoader.updateWaterEffect(gameTime);
     if (!isDead) runTime += dt;
-    isoCamera.setWorldFocus(character.position.x, character.position.y, character.position.z);
     if (isDead) return;
     setMana(mana + MANA_REGEN_PER_SECOND * dt);
-    
+
+    let tickSteps = tickClock.advance(dt);
+    while (tickSteps-- > 0) processGameTick();
+
+    while (
+      pendingTrainingDummyMeleeSwings > 0 &&
+      attackTarget !== null &&
+      attackTarget.type === 'training_dummy' &&
+      trainingDummyAlive &&
+      isAtTrainingDummyMeleeStand()
+    ) {
+      pendingTrainingDummyMeleeSwings--;
+      const pc = getPlayerLogicalWorldTileCenter();
+      const dx = trainingDummyWorldPos.x - pc.x;
+      const dz = trainingDummyWorldPos.z - pc.z;
+      const targetDir = new THREE.Vector3(dx, 0, dz).normalize();
+      performTrainingDummyMelee(gameTime, targetDir);
+    }
+    if (pendingTrainingDummyMeleeSwings > 0) pendingTrainingDummyMeleeSwings = 0;
+
     // Update player burning status
     if (playerBurning) {
       const burnAge = gameTime - playerBurnStartTime;
@@ -2367,7 +4355,7 @@ const gameLoop = new GameLoop(
     }
     
     // Inferno-style: when all enemies dead, advance to next wave (no portal)
-    if (waves.isWaveComplete(() => isAnyEnemyAlive())) {
+    if (!FRESH_GRID_MODE && waves.isWaveComplete(() => isAnyEnemyAlive())) {
       addChatMessage(`Wave ${waves.getCurrentWave()} completed!`);
       while (enemyFireballs.length > 0) {
         const ef = enemyFireballs.pop()!;
@@ -2378,12 +4366,22 @@ const gameLoop = new GameLoop(
       bossApi.clearFireballs();
       waves.startWave(waves.getCurrentWave() + 1);
     }
+    updateAutoAttack(dt, gameTime);
     updateCharacterMove(dt);
+    updatePlayerTileMarkers();
+    maybeSyncTerrainChunks();
+    syncMultiplayerPathTile();
+    remotePlayersApi?.updateInterpolation(dt);
     updatePlayerCollisions(dt);
+    if (!isDead) {
+      snapCharacterYToTerrain();
+      followCamera.setTarget(character.position.x, character.position.y, character.position.z);
+    }
     const combatState = buildCombatState();
     swordApi.update(dt, gameTime, combatState);
-    updateAutoAttack(dt, gameTime);
     updateEnemies(dt, gameTime);
+    updatePenRatVisuals(gameTime);
+    updateStartingWildlifeVisuals(gameTime);
     updateEnemyAttackHitEffects(gameTime);
     updateCasters(dt, gameTime);
     updateResurrectors(dt, gameTime);
@@ -2432,13 +4430,15 @@ const gameLoop = new GameLoop(
       const instant = 1 / dt;
       smoothedFps += (instant - smoothedFps) * 0.08;
     }
-    const camera = isoCamera.three;
+    const camera = followCamera.three;
     const hudState: HUDState = {
       canvasWidth: cw,
       canvasHeight: ch,
       camera,
       runTime,
       smoothedFps,
+      latencyMs: multiplayerClient !== null ? multiplayerClient.getLatencyMs() : null,
+      tickAlpha: tickClock.getTickAlpha(),
       health,
       maxHealth: getMaxHealth(),
       mana,
@@ -2455,11 +4455,11 @@ const gameLoop = new GameLoop(
       enemyAlive,
       enemyHealth,
       enemyMaxHealth: MAX_ENEMY_HEALTH,
-      casterPositions: casterMeshes.map((m) => m.position),
+      casterPositions: casterLogicalPos,
       casterAlive,
       casterHealth,
       casterMaxHealth: MAX_CASTER_HEALTH,
-      resurrectorPositions: resurrectorMeshes.map((m) => m.position),
+      resurrectorPositions: resurrectorLogicalPos,
       resurrectorAlive,
       resurrectorHealth,
       resurrectorMaxHealth: MAX_RESURRECTOR_HEALTH,
@@ -2471,13 +4471,23 @@ const gameLoop = new GameLoop(
       bossAlive: bossApi.isAlive(),
       bossHealth: bossApi.getHealth(),
       bossMaxHealth: bossApi.getMaxHealth(),
+      runEnabled: playerRunEnabled,
+      runEnergy: playerRunEnergy,
+      runEnergyMax: RUN_ENERGY_MAX,
     };
     hud.update(hudState);
+    minimap.update({
+      playerX: character.position.x,
+      playerZ: character.position.z,
+      npcYellow: collectMinimapNpcYellow(),
+      playersWhite: remotePlayersApi?.getMinimapPositions() ?? [],
+      itemsRed: groundItemsApi.getMinimapPoints(),
+    });
     bossApi.getHitboxIndicator().visible = bossApi.isAlive();
     // Update floating hit markers
-    updateHitMarkers(now / 1000, camera, cw, ch);
+    hitMarkers.updateHitMarkers(now / 1000, camera, cw, ch);
     groundItemsApi.updateLabels();
-    renderer.render(scene, isoCamera.three);
+    renderer.render(scene, followCamera.three);
   }
 );
 
@@ -2492,20 +4502,55 @@ function onResize(): void {
   width = w;
   height = h;
   renderer.setSize(width, height);
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-  isoCamera.resize(width, height);
+  renderer.setPixelRatio(getRendererPixelRatio(gameOptions));
+  followCamera.resize(width, height);
 }
 
 window.addEventListener('resize', onResize);
 
 function forceRepaint(): void {
   if (!glContextLost && canvas.clientWidth > 0 && canvas.clientHeight > 0) {
-    renderer.render(scene, isoCamera.three);
+    renderer.render(scene, followCamera.three);
   }
 }
 
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') forceRepaint();
+});
+
+document.getElementById('options-debug-snapshot')?.addEventListener('click', () => {
+  const ri = renderer.info;
+  console.log('[web-iso debug snapshot]', {
+    runTime,
+    paused: isPaused,
+    dead: isDead,
+    wave: waves.getCurrentWave(),
+    position: character.position.toArray(),
+    health,
+    mana,
+    level,
+    xp,
+    prayer: activePrayer,
+    freshGridBuild: FRESH_GRID_MODE,
+    weapon: equipment.getWeapon(),
+    skills: playerSkills.snapshot(),
+    multiplayer: multiplayerClient !== null,
+    webgl: {
+      calls: ri.render.calls,
+      triangles: ri.render.triangles,
+      points: ri.render.points,
+      lines: ri.render.lines,
+      geometries: ri.memory.geometries,
+      textures: ri.memory.textures,
+    },
+  });
+});
+
+document.getElementById('options-debug-fill-vitals')?.addEventListener('click', () => {
+  if (isDead) return;
+  setHealth(getMaxHealth());
+  setMana(MAX_MANA);
+  playerRunEnergy = RUN_ENERGY_MAX;
 });
 
 gameLoop.start();

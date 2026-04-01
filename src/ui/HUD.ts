@@ -15,6 +15,8 @@ export interface HUDConfig {
   casterCount: number;
   resurrectorCount: number;
   teleporterCount: number;
+  /** Flip run vs walk (tiles advanced per game tick). */
+  onRunToggle: () => void;
 }
 
 export interface HUDState {
@@ -23,6 +25,10 @@ export interface HUDState {
   camera: THREE.Camera;
   runTime: number;
   smoothedFps: number;
+  /** Round-trip latency (ms) when multiplayer ping is active; null otherwise. */
+  latencyMs: number | null;
+  /** Game tick progress: 0 at tick boundary → 1 just before the next tick (~0.6s OSRS-style). */
+  tickAlpha: number;
   health: number;
   maxHealth: number;
   mana: number;
@@ -55,6 +61,10 @@ export interface HUDState {
   bossAlive: boolean;
   bossHealth: number;
   bossMaxHealth: number;
+  /** When true, path advances 2 tiles per tick; when false, 1 tile per tick. */
+  runEnabled: boolean;
+  runEnergy: number;
+  runEnergyMax: number;
 }
 
 export interface HUDAPI {
@@ -78,18 +88,39 @@ function createEnemyHealthBar(): { wrap: HTMLDivElement; fill: HTMLDivElement } 
 }
 
 export function createHUD(container: HTMLElement, config: HUDConfig): HUDAPI {
-  const { enemyCount, casterCount, resurrectorCount, teleporterCount } = config;
+  const { enemyCount, casterCount, resurrectorCount, teleporterCount, onRunToggle } = config;
   const projectionVec = new THREE.Vector3();
 
+  const perfStack = document.createElement('div');
+  perfStack.id = 'hud-perf';
   const fpsEl = document.createElement('div');
   fpsEl.id = 'fps';
   fpsEl.textContent = '— FPS';
-  container.appendChild(fpsEl);
+  const latencyEl = document.createElement('div');
+  latencyEl.id = 'latency';
+  latencyEl.textContent = '— ms';
+  perfStack.appendChild(fpsEl);
+  perfStack.appendChild(latencyEl);
+  container.appendChild(perfStack);
 
   const timerEl = document.createElement('div');
   timerEl.id = 'timer';
   timerEl.textContent = 'Time: 0:00';
   container.appendChild(timerEl);
+
+  const tickHud = document.createElement('div');
+  tickHud.id = 'hud-tick-bar';
+  tickHud.style.cssText =
+    'position:absolute;top:40px;left:50%;transform:translateX(-50%);z-index:5;display:flex;flex-direction:column;align-items:center;gap:4px;pointer-events:none;';
+  const tickTrack = document.createElement('div');
+  tickTrack.style.cssText =
+    'position:relative;width:160px;height:8px;background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.2);border-radius:4px;box-sizing:border-box;';
+  const tickNeedle = document.createElement('div');
+  tickNeedle.style.cssText =
+    'position:absolute;top:0;bottom:0;width:2px;margin-left:-1px;background:rgba(255,220,120,0.95);border-radius:1px;box-shadow:0 0 6px rgba(255,200,80,0.5);left:0%;';
+  tickTrack.appendChild(tickNeedle);
+  tickHud.appendChild(tickTrack);
+  container.appendChild(tickHud);
 
   const barStyle = 'width:180px;height:14px;background:rgba(0,0,0,0.6);border-radius:7px;overflow:hidden;border:1px solid rgba(255,255,255,0.15);';
   const fillStyle = 'height:100%;border-radius:6px;transition:width 0.15s ease-out;';
@@ -139,8 +170,28 @@ export function createHUD(container: HTMLElement, config: HUDConfig): HUDAPI {
   levelXpEl.appendChild(xpBarWrap);
 
   const skillTreeHintBar = document.createElement('div');
-  skillTreeHintBar.textContent = 'Space — Melee  |  K — Skill tree  |  I — Inventory';
+  skillTreeHintBar.textContent =
+    'Space — Melee  |  K — Skill tree  |  I — Menu  |  RMB — Menu  |  Shift+RMB — Fireball';
   skillTreeHintBar.style.cssText = 'font:10px sans-serif;color:rgba(255,255,255,0.5);margin-top:4px;';
+
+  const runEnergyLabel = document.createElement('div');
+  runEnergyLabel.style.cssText = 'font:11px sans-serif;color:rgba(255,255,255,0.75);margin-top:8px;';
+  runEnergyLabel.textContent = 'Run energy';
+  const runEnergyBarWrap = document.createElement('div');
+  runEnergyBarWrap.style.cssText =
+    barStyle + 'width:180px;height:10px;pointer-events:auto;margin-top:2px;border-radius:5px;';
+  const runEnergyFill = document.createElement('div');
+  runEnergyFill.style.cssText =
+    `width:100%;height:100%;border-radius:4px;background:linear-gradient(90deg,#b08020,#e8c860);${fillStyle}`;
+  runEnergyBarWrap.appendChild(runEnergyFill);
+
+  const runBtn = document.createElement('button');
+  runBtn.type = 'button';
+  runBtn.style.cssText =
+    'align-self:flex-start;margin-top:8px;padding:6px 12px;font:12px sans-serif;border-radius:6px;cursor:pointer;' +
+    'border:1px solid rgba(255,255,255,0.28);background:rgba(28,28,36,0.92);color:#eee;pointer-events:auto;' +
+    'transition:opacity 0.12s,border-color 0.12s;';
+  runBtn.addEventListener('click', () => onRunToggle());
 
   const waveLabelEl = document.createElement('div');
   waveLabelEl.style.cssText = 'font:10px sans-serif;color:rgba(255,255,255,0.6);margin-top:6px;margin-bottom:2px;';
@@ -154,12 +205,16 @@ export function createHUD(container: HTMLElement, config: HUDConfig): HUDAPI {
   barsEl.appendChild(manaBarWrap);
   barsEl.appendChild(statsEl);
   barsEl.appendChild(levelXpEl);
+  barsEl.appendChild(runEnergyLabel);
+  barsEl.appendChild(runEnergyBarWrap);
+  barsEl.appendChild(runBtn);
   barsEl.appendChild(skillTreeHintBar);
   barsEl.appendChild(waveLabelEl);
   barsEl.appendChild(waveEl);
   container.appendChild(barsEl);
 
   const enemyHealthBarsContainer = document.createElement('div');
+  enemyHealthBarsContainer.id = 'hud-enemy-health-bars';
   enemyHealthBarsContainer.style.cssText = 'position:absolute;inset:0;z-index:4;pointer-events:none;';
 
   const enemyHealthBarEls: { wrap: HTMLDivElement; fill: HTMLDivElement }[] = [];
@@ -197,7 +252,12 @@ export function createHUD(container: HTMLElement, config: HUDConfig): HUDAPI {
     const { canvasWidth: cw, canvasHeight: ch, camera } = state;
 
     fpsEl.textContent = `${Math.round(state.smoothedFps)} FPS`;
+    latencyEl.textContent =
+      state.latencyMs !== null ? `${Math.round(state.latencyMs)} ms` : '— ms';
     timerEl.textContent = `Time: ${formatTime(state.runTime)}`;
+
+    const a = Math.min(1, Math.max(0, state.tickAlpha));
+    tickNeedle.style.left = `${a * 100}%`;
 
     healthBarWrap.title = `${state.health} / ${state.maxHealth}`;
     healthFill.style.width = `${state.maxHealth > 0 ? (state.health / state.maxHealth) * 100 : 0}%`;
@@ -220,6 +280,23 @@ export function createHUD(container: HTMLElement, config: HUDConfig): HUDAPI {
     xpBarWrap.title = `${state.xp} / ${state.xpForNextLevel} XP`;
 
     waveEl.textContent = String(state.currentWave);
+
+    const reMax = state.runEnergyMax > 0 ? state.runEnergyMax : 1;
+    const rePct = Math.min(100, (state.runEnergy / reMax) * 100);
+    runEnergyFill.style.width = `${rePct}%`;
+    runEnergyBarWrap.title = `${Math.round(state.runEnergy)} / ${state.runEnergyMax} — drains only when a tick moves 2 tiles; 1-tile steps cost nothing; regains while idle`;
+
+    runBtn.textContent = state.runEnabled ? 'Run' : 'Walk';
+    runBtn.title = state.runEnabled
+      ? 'Running: 2 tiles per tick when path allows; energy drops only on those 2-tile steps. Click to walk.'
+      : `Walking: 1 tile per tick. Need run energy to run (${Math.round(state.runEnergy)} now).`;
+    const canRun = state.runEnergy > 0;
+    runBtn.style.opacity = state.runEnabled ? '1' : canRun ? '0.88' : '0.55';
+    runBtn.style.borderColor = state.runEnabled
+      ? 'rgba(120, 200, 140, 0.55)'
+      : canRun
+        ? 'rgba(255,255,255,0.22)'
+        : 'rgba(255,255,255,0.12)';
 
     for (let j = 0; j < enemyCount; j++) {
       const bar = enemyHealthBarEls[j];

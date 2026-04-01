@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Web Iso — Level editor</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; background: #121218; color: #e8e8ee; font-family: system-ui, sans-serif; }
+      #wrap { display: flex; flex-direction: column; height: 100%; padding: 12px; gap: 10px; }
+      header { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
+      header h1 { font-size: 1rem; font-weight: 600; color: #b8b8c8; margin-right: 8px; }
+      .btn {
+        padding: 6px 12px;
+        border-radius: 6px;
+        border: 1px solid rgba(255,255,255,0.2);
+        background: #252530;
+        color: #eee;
+        font-size: 13px;
+        cursor: pointer;
+      }
+      .btn:hover { background: #323240; }
+      label.btn input { display: none; }
+      #hint { font-size: 12px; color: #888; }
+      #main { flex: 1; display: flex; gap: 12px; min-height: 0; }
+      #palette-panel {
+        width: 160px;
+        flex-shrink: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        font-size: 12px;
+      }
+      #palette-panel h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: #888; }
+      #palette { display: flex; flex-direction: column; gap: 4px; }
+      .swatch {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 8px;
+        border-radius: 6px;
+        cursor: pointer;
+        border: 2px solid transparent;
+        background: rgba(255,255,255,0.04);
+      }
+      .swatch[data-active="true"] { border-color: #6a9cff; background: rgba(106,156,255,0.12); }
+      .swatch .dot { width: 20px; height: 20px; border-radius: 4px; flex-shrink: 0; border: 1px solid rgba(0,0,0,0.4); }
+      .swatch span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      #canvas-wrap {
+        flex: 1;
+        min-width: 0;
+        border-radius: 8px;
+        overflow: auto;
+        border: 1px solid rgba(255,255,255,0.1);
+        background: #0a0a10;
+      }
+      canvas { display: block; image-rendering: pixelated; image-rendering: crisp-edges; cursor: crosshair; }
+    </style>
+  </head>
+  <body>
+    <div id="wrap">
+      <header>
+        <h1>Chunk editor (64×64)</h1>
+        <button type="button" class="btn" id="btn-new">New chunk</button>
+        <label class="btn">Open…<input type="file" id="file-open" accept=".json,.chunk.json,application/json" /></label>
+        <button type="button" class="btn" id="btn-save">Download .chunk.json</button>
+        <span id="hint">Drag on the grid to paint. Palette entries are texture ids (runtime loads textures later).</span>
+      </header>
+      <div id="main">
+        <div id="palette-panel">
+          <h2>Textures</h2>
+          <div id="palette"></div>
+        </div>
+        <div id="canvas-wrap">
+          <canvas id="grid" width="512" height="512" aria-label="Tile grid"></canvas>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="/src/editor/main.ts"></script>
+  </body>
+</html>

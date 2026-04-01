@@ -11,6 +11,9 @@ import {
   TELEPORTER_COUNT,
 } from '../config/Constants';
 
+/** Empty arena: no wave spawns, no auto wave progression — explore a clean grid. */
+export const FRESH_GRID_MODE = true;
+
 export interface WaveComposition {
   grunts: number;
   casters: number;
@@ -45,6 +48,9 @@ function seededRandom(seed: number): () => number {
 
 /** Wave 1: 1 of every monster. Wave 2: 2 grunts. Wave 3: 1 caster. Wave 4: 2 casters. Wave 5+: grunts + 2 casters + resurrector(s) + teleporter(s). */
 export function getWaveComposition(wave: number): WaveComposition {
+  if (FRESH_GRID_MODE) {
+    return { grunts: 0, casters: 0, resurrectors: 0, teleporters: 0 };
+  }
   if (wave >= 5) {
     const resurrectors = Math.min(1 + Math.floor((wave - 5) / 2), RESURRECTOR_COUNT);
     const teleporters = Math.min(1 + Math.floor((wave - 5) / 3), TELEPORTER_COUNT);

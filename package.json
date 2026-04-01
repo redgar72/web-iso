@@ -6,13 +6,23 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "server": "tsx server/index.ts",
+    "dev:mp": "concurrently -k \"npm run server\" \"vite\"",
+    "spacetime:build": "spacetime build --project-path spacetimedb",
+    "spacetime:generate": "spacetime generate --lang typescript --out-dir src/net/stdb --project-path spacetimedb",
+    "spacetime:publish": "spacetime publish --server maincloud aidans-game --project-path spacetimedb"
   },
   "dependencies": {
-    "three": "^0.170.0"
+    "spacetimedb": "^1.12.0",
+    "three": "^0.170.0",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/three": "^0.169.0",
+    "@types/ws": "^8.5.13",
+    "concurrently": "^9.1.2",
+    "tsx": "^4.19.2",
     "typescript": "~5.7.2",
     "vite": "^6.0.1"
   }

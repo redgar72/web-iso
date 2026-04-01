@@ -11,6 +11,8 @@ export interface CombatDamageCallbacks {
   damageResurrector: (index: number, amount: number) => boolean;
   damageTeleporter: (index: number, amount: number) => boolean;
   damageBoss: (amount: number) => boolean;
+  damagePenRat: (index: number, amount: number) => boolean;
+  damageWildlife: (index: number, amount: number) => boolean;
 }
 
 /** State snapshot for hit detection; main fills this each frame. */
@@ -25,9 +27,18 @@ export interface CombatState {
   teleporterAlive: boolean[];
   bossPosition: THREE.Vector3;
   bossAlive: boolean;
+  penRatPositions: THREE.Vector3[];
+  penRatAlive: boolean[];
+  penRatAttackable: boolean[];
+  /** Per-mob XZ hit radius (half-extent) for disk checks; same role as `enemySize / 2`. */
+  wildlifePositions: THREE.Vector3[];
+  wildlifeAlive: boolean[];
+  wildlifeAttackable: boolean[];
+  wildlifeHitRadius: number[];
   enemySize: number;
   casterSize: number;
   resurrectorSize: number;
   teleporterSize: number;
+  penRatSize: number;
   bossHitboxRadius: number;
 }

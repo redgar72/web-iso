@@ -2,6 +2,8 @@
  * Game balance and tuning constants. Single place to adjust combat, enemies, waves, etc.
  */
 
+import { TERRAIN_GRID_WIDTH, TILE_SIZE } from '../../shared/world';
+
 // --- Persistence / UI ---
 export const BEST_TIME_KEY = 'web-iso-best-time';
 export const CHAT_MAX_MESSAGES = 50;
@@ -89,7 +91,7 @@ export const XP_BOSS = 200;
 
 // --- Movement / terrain ---
 export const TERRAIN_XZ_MIN = 0;
-export const TERRAIN_XZ_MAX = 48;
+export const TERRAIN_XZ_MAX = TERRAIN_GRID_WIDTH * TILE_SIZE;
 export const CHARACTER_MOVE_SPEED = 12;
 export const MOVE_ARRIVAL_DIST = 0.05;
 

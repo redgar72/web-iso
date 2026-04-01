@@ -1,4 +1,8 @@
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
   // For GitHub Pages: set base to /repo-name/ so assets load. Local dev uses '/' by default.
@@ -8,5 +12,11 @@ export default defineConfig({
     minify: 'esbuild',
     sourcemap: true,
     outDir: 'dist',
+    rollupOptions: {
+      input: {
+        main: path.resolve(__dirname, 'index.html'),
+        editor: path.resolve(__dirname, 'editor.html'),
+      },
+    },
   },
 });

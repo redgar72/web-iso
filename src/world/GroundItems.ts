@@ -6,6 +6,7 @@
 import * as THREE from 'three';
 import type { ItemId } from '../items/ItemTypes';
 import { getItemDef } from '../items/ItemTypes';
+import { worldXZToTile, tileCenterXZ, type GridTile } from './TilePathfinding';
 
 const GROUND_ITEM_USERDATA = 'groundItemId';
 
@@ -16,12 +17,32 @@ export interface GroundItemsOptions {
   canvas: HTMLCanvasElement;
   tryAddToInventory: (itemId: ItemId) => boolean;
   canInteract: () => boolean;
+  /** Player must share this tile with the item (ground mesh world XZ) to pick it up. */
+  isPlayerOnItemTile: (itemTile: GridTile) => boolean;
+  /** Called when a pickup is attempted but the player is not on the item's tile. */
+  onPickupOutOfRange?: () => void;
+  /** Label click / external “pick this up”: path to tile or pick up if already there. */
+  requestWalkOrPickup: (itemId: number) => void;
+}
+
+export interface GroundItemRayHit {
+  id: number;
+  itemId: ItemId;
 }
 
 export interface GroundItemsAPI {
   spawn: (position: THREE.Vector3, itemId: ItemId) => void;
   updateLabels: () => void;
   tryPickupFromRaycast: (raycaster: THREE.Raycaster) => boolean;
+  tryPickupFromIntersection: (hit: THREE.Intersection) => boolean;
+  getGroup: () => THREE.Group;
+  findAtRay: (raycaster: THREE.Raycaster) => GroundItemRayHit | null;
+  resolveGroundItemFromIntersection: (hit: THREE.Intersection) => GroundItemRayHit | null;
+  tryPickupById: (id: number) => boolean;
+  /** World XZ center of the item's tile (for pathing onto the pickup tile). */
+  getPickupGoalXZ: (id: number) => { x: number; z: number } | null;
+  /** World XZ for each dropped item (minimap, etc.). */
+  getMinimapPoints: () => { x: number; z: number }[];
 }
 
 interface GroundItemEntry {
@@ -76,6 +97,12 @@ export function createGroundItems(options: GroundItemsOptions): GroundItemsAPI {
   function pickupById(id: number): boolean {
     const entry = entries.find((e) => e.id === id);
     if (!entry) return false;
+    entry.mesh.getWorldPosition(tmpVec);
+    const itemTile = worldXZToTile(tmpVec.x, tmpVec.z);
+    if (!options.isPlayerOnItemTile(itemTile)) {
+      options.onPickupOutOfRange?.();
+      return false;
+    }
     if (!options.tryAddToInventory(entry.itemId)) return false;
     removeEntry(entry);
     return true;
@@ -102,7 +129,7 @@ export function createGroundItems(options: GroundItemsOptions): GroundItemsAPI {
       if (!options.canInteract()) return;
       e.preventDefault();
       e.stopPropagation();
-      pickupById(id);
+      options.requestWalkOrPickup(id);
     });
 
     labelLayer.appendChild(labelEl);
@@ -138,18 +165,80 @@ export function createGroundItems(options: GroundItemsOptions): GroundItemsAPI {
 
   function tryPickupFromRaycast(raycaster: THREE.Raycaster): boolean {
     if (!options.canInteract()) return false;
+    const hit = findAtRay(raycaster);
+    if (!hit) return false;
+    return pickupById(hit.id);
+  }
+
+  function resolveGroundItemFromIntersection(hit: THREE.Intersection): GroundItemRayHit | null {
+    let obj: THREE.Object3D | null = hit.object;
+    while (obj) {
+      const gid = obj.userData[GROUND_ITEM_USERDATA];
+      if (typeof gid === 'number') {
+        const entry = entries.find((e) => e.id === gid);
+        if (!entry) return null;
+        return { id: entry.id, itemId: entry.itemId };
+      }
+      obj = obj.parent;
+    }
+    return null;
+  }
+
+  function tryPickupFromIntersection(hit: THREE.Intersection): boolean {
+    if (!options.canInteract()) return false;
+    const g = resolveGroundItemFromIntersection(hit);
+    if (!g) return false;
+    return pickupById(g.id);
+  }
+
+  function findAtRay(raycaster: THREE.Raycaster): GroundItemRayHit | null {
     const hits = raycaster.intersectObject(group, true);
-    if (hits.length === 0) return false;
+    if (hits.length === 0) return null;
     let obj: THREE.Object3D | null = hits[0].object;
     while (obj) {
       const gid = obj.userData[GROUND_ITEM_USERDATA];
       if (typeof gid === 'number') {
-        return pickupById(gid);
+        const entry = entries.find((e) => e.id === gid);
+        if (!entry) return null;
+        return { id: entry.id, itemId: entry.itemId };
       }
       obj = obj.parent;
     }
-    return false;
+    return null;
   }
 
-  return { spawn, updateLabels, tryPickupFromRaycast };
+  function tryPickupById(id: number): boolean {
+    if (!options.canInteract()) return false;
+    return pickupById(id);
+  }
+
+  function getPickupGoalXZ(id: number): { x: number; z: number } | null {
+    const entry = entries.find((e) => e.id === id);
+    if (!entry) return null;
+    entry.mesh.getWorldPosition(tmpVec);
+    const tile = worldXZToTile(tmpVec.x, tmpVec.z);
+    return tileCenterXZ(tile);
+  }
+
+  function getMinimapPoints(): { x: number; z: number }[] {
+    const out: { x: number; z: number }[] = [];
+    for (const e of entries) {
+      e.mesh.getWorldPosition(tmpVec);
+      out.push({ x: tmpVec.x, z: tmpVec.z });
+    }
+    return out;
+  }
+
+  return {
+    spawn,
+    updateLabels,
+    tryPickupFromRaycast,
+    tryPickupFromIntersection,
+    getGroup: () => group,
+    findAtRay,
+    resolveGroundItemFromIntersection,
+    tryPickupById,
+    getPickupGoalXZ,
+    getMinimapPoints,
+  };
 }

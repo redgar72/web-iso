@@ -31,6 +31,8 @@ export interface SwordConfig {
   enemyCount: number;
   casterCount: number;
   resurrectorCount: number;
+  penRatCount: number;
+  wildlifeCount: number;
 }
 
 export interface SwordAPI {
@@ -38,8 +40,16 @@ export interface SwordAPI {
   update: (dt: number, gameTime: number, state: CombatState) => void;
   /** Call when player triggers melee attack (Space or auto-attack). */
   startMeleeSwing: (gameTime: number) => void;
-  /** Directional melee slash: hit enemies in arc in front; call after startMeleeSwing. */
-  performMeleeAttack: (gameTime: number, targetDirection: THREE.Vector3 | null, state: CombatState) => void;
+  /**
+   * Directional melee slash: hit enemies in arc in front; call after startMeleeSwing.
+   * Optional `hitOrigin`: melee range / arc checks use this world XZ (e.g. true tile center) while the mesh keeps lerping.
+   */
+  performMeleeAttack: (
+    gameTime: number,
+    targetDirection: THREE.Vector3 | null,
+    state: CombatState,
+    hitOrigin?: THREE.Vector3 | null
+  ) => void;
   /** The mesh parented to character (visibility controlled by update). */
   getEquippedMesh: () => THREE.Group;
 }
@@ -94,6 +104,8 @@ export function createSword(
   const swordWorldPos2 = new THREE.Vector3();
   let swordSwingStartTime = -999;
   const lastSwordHitByEnemy: number[] = Array(config.enemyCount).fill(-999);
+  const lastSwordHitByPenRat: number[] = Array(config.penRatCount).fill(-999);
+  const lastSwordHitByWildlife: number[] = Array(config.wildlifeCount).fill(-999);
 
   function updateEquippedSword(gameTime: number): void {
     equippedSword.visible = config.getEquippedWeapon() === 'sword';
@@ -174,6 +186,24 @@ export function createSword(
     if (state.bossAlive && worldPos.distanceTo(state.bossPosition) < state.bossHitboxRadius + hitR) {
       callbacks.damageBoss(dmg);
     }
+    const penHitDist = state.penRatSize / 2 + hitR;
+    for (let p = 0; p < state.penRatPositions.length; p++) {
+      if (!state.penRatAlive[p] || !state.penRatAttackable[p]) continue;
+      if (gameTime - lastSwordHitByPenRat[p] < hitCooldown) continue;
+      if (worldPos.distanceTo(state.penRatPositions[p]) < penHitDist) {
+        callbacks.damagePenRat(p, dmg);
+        lastSwordHitByPenRat[p] = gameTime;
+      }
+    }
+    for (let w = 0; w < state.wildlifePositions.length; w++) {
+      if (!state.wildlifeAlive[w] || !state.wildlifeAttackable[w]) continue;
+      if (gameTime - lastSwordHitByWildlife[w] < hitCooldown) continue;
+      const wh = state.wildlifeHitRadius[w] + hitR;
+      if (worldPos.distanceTo(state.wildlifePositions[w]) < wh) {
+        callbacks.damageWildlife(w, dmg);
+        lastSwordHitByWildlife[w] = gameTime;
+      }
+    }
   }
 
   function update(dt: number, gameTime: number, state: CombatState): void {
@@ -205,10 +235,15 @@ export function createSword(
     swordSwingStartTime = gameTime;
   }
 
-  function performMeleeAttack(gameTime: number, targetDirection: THREE.Vector3 | null, state: CombatState): void {
+  function performMeleeAttack(
+    gameTime: number,
+    targetDirection: THREE.Vector3 | null,
+    state: CombatState,
+    hitOrigin?: THREE.Vector3 | null
+  ): void {
     startMeleeSwing(gameTime);
 
-    const charPos = character.position;
+    const hitPos = hitOrigin ?? character.position;
     let attackDir: THREE.Vector3;
     if (targetDirection && targetDirection.lengthSq() > 0.0001) {
       attackDir = targetDirection.clone().normalize();
@@ -226,7 +261,7 @@ export function createSword(
 
     for (let j = 0; j < state.enemyPositions.length; j++) {
       if (!state.enemyAlive[j]) continue;
-      const toEnemy = new THREE.Vector3().subVectors(state.enemyPositions[j], charPos);
+      const toEnemy = new THREE.Vector3().subVectors(state.enemyPositions[j], hitPos);
       const dist = toEnemy.length();
       if (dist <= meleeDist && dist > 0.01) {
         toEnemy.normalize();
@@ -239,7 +274,7 @@ export function createSword(
     const casterMeleeDist = state.casterSize / 2 + MELEE_RANGE;
     for (let c = 0; c < state.casterPositions.length; c++) {
       if (!state.casterAlive[c]) continue;
-      const toCaster = new THREE.Vector3().subVectors(state.casterPositions[c], charPos);
+      const toCaster = new THREE.Vector3().subVectors(state.casterPositions[c], hitPos);
       const dist = toCaster.length();
       if (dist <= casterMeleeDist && dist > 0.01) {
         toCaster.normalize();
@@ -252,7 +287,7 @@ export function createSword(
     const resMeleeDist = state.resurrectorSize / 2 + MELEE_RANGE;
     for (let r = 0; r < state.resurrectorPositions.length; r++) {
       if (!state.resurrectorAlive[r]) continue;
-      const toRes = new THREE.Vector3().subVectors(state.resurrectorPositions[r], charPos);
+      const toRes = new THREE.Vector3().subVectors(state.resurrectorPositions[r], hitPos);
       const dist = toRes.length();
       if (dist <= resMeleeDist && dist > 0.01) {
         toRes.normalize();
@@ -265,7 +300,7 @@ export function createSword(
     const teleporterMeleeDist = state.teleporterSize / 2 + MELEE_RANGE;
     for (let t = 0; t < state.teleporterPositions.length; t++) {
       if (!state.teleporterAlive[t]) continue;
-      const toTele = new THREE.Vector3().subVectors(state.teleporterPositions[t], charPos);
+      const toTele = new THREE.Vector3().subVectors(state.teleporterPositions[t], hitPos);
       const dist = toTele.length();
       if (dist <= teleporterMeleeDist && dist > 0.01) {
         toTele.normalize();
@@ -276,13 +311,39 @@ export function createSword(
     }
 
     if (state.bossAlive) {
-      const toBoss = new THREE.Vector3().subVectors(state.bossPosition, charPos);
+      const toBoss = new THREE.Vector3().subVectors(state.bossPosition, hitPos);
       const dist = toBoss.length();
       if (dist <= state.bossHitboxRadius + MELEE_RANGE && dist > 0.01) {
         toBoss.normalize();
         const dot = attackDir.dot(toBoss);
         const angle = Math.acos(Math.max(-1, Math.min(1, dot)));
         if (angle <= MELEE_ARC / 2) callbacks.damageBoss(dmg);
+      }
+    }
+
+    const ratMeleeDist = state.penRatSize / 2 + MELEE_RANGE;
+    for (let p = 0; p < state.penRatPositions.length; p++) {
+      if (!state.penRatAlive[p] || !state.penRatAttackable[p]) continue;
+      const toRat = new THREE.Vector3().subVectors(state.penRatPositions[p], hitPos);
+      const dist = toRat.length();
+      if (dist <= ratMeleeDist && dist > 0.01) {
+        toRat.normalize();
+        const dot = attackDir.dot(toRat);
+        const angle = Math.acos(Math.max(-1, Math.min(1, dot)));
+        if (angle <= MELEE_ARC / 2) callbacks.damagePenRat(p, dmg);
+      }
+    }
+
+    for (let w = 0; w < state.wildlifePositions.length; w++) {
+      if (!state.wildlifeAlive[w] || !state.wildlifeAttackable[w]) continue;
+      const wildMeleeDist = state.wildlifeHitRadius[w] + MELEE_RANGE;
+      const toW = new THREE.Vector3().subVectors(state.wildlifePositions[w], hitPos);
+      const dist = toW.length();
+      if (dist <= wildMeleeDist && dist > 0.01) {
+        toW.normalize();
+        const dot = attackDir.dot(toW);
+        const angle = Math.acos(Math.max(-1, Math.min(1, dot)));
+        if (angle <= MELEE_ARC / 2) callbacks.damageWildlife(w, dmg);
       }
     }
   }

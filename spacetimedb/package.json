@@ -1,0 +1,13 @@
+{
+  "name": "web-iso-spacetimedb",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "spacetime build",
+    "publish": "spacetime publish --server maincloud aidans-game --project-path ."
+  },
+  "dependencies": {
+    "spacetimedb": "^1.12.0"
+  }
+}

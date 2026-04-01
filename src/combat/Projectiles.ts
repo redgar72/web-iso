@@ -84,6 +84,14 @@ function applyExplosionDamage(
     if (pos.distanceTo(state.teleporterPositions[t]) <= r) callbacks.damageTeleporter(t, getDmg());
   }
   if (state.bossAlive && pos.distanceTo(state.bossPosition) <= r) callbacks.damageBoss(getDmg());
+  for (let p = 0; p < state.penRatPositions.length; p++) {
+    if (!state.penRatAlive[p] || !state.penRatAttackable[p]) continue;
+    if (pos.distanceTo(state.penRatPositions[p]) <= r) callbacks.damagePenRat(p, getDmg());
+  }
+  for (let w = 0; w < state.wildlifePositions.length; w++) {
+    if (!state.wildlifeAlive[w] || !state.wildlifeAttackable[w]) continue;
+    if (pos.distanceTo(state.wildlifePositions[w]) <= r) callbacks.damageWildlife(w, getDmg());
+  }
 }
 
 export function createFireballs(
@@ -242,6 +250,50 @@ export function createFireballs(
           break;
         }
       }
+      if (fireballs[i] !== fb) continue;
+
+      const penHitR = state.penRatSize / 2 + FIREBALL_RADIUS;
+      for (let p = 0; p < state.penRatPositions.length; p++) {
+        if (!state.penRatAlive[p] || !state.penRatAttackable[p]) continue;
+        if (fb.mesh.position.distanceTo(state.penRatPositions[p]) < penHitR) {
+          if (config.hasExplosionAugment()) {
+            fb.state = 'exploding';
+            fb.velocity.set(0, 0, 0);
+            fb.explosionElapsed = 0;
+            fb.mesh.position.copy(state.penRatPositions[p]);
+            applyExplosionDamage(fb.mesh.position, state, getDmg, getRadius, callbacks);
+          } else {
+            callbacks.damagePenRat(p, getDmg());
+            scene.remove(fb.mesh);
+            (fb.mesh.geometry as THREE.BufferGeometry).dispose();
+            (fb.mesh.material as THREE.Material).dispose();
+            fireballs.splice(i, 1);
+          }
+          break;
+        }
+      }
+      if (fireballs[i] !== fb) continue;
+
+      for (let w = 0; w < state.wildlifePositions.length; w++) {
+        if (!state.wildlifeAlive[w] || !state.wildlifeAttackable[w]) continue;
+        const wildHitR = state.wildlifeHitRadius[w] + FIREBALL_RADIUS;
+        if (fb.mesh.position.distanceTo(state.wildlifePositions[w]) < wildHitR) {
+          if (config.hasExplosionAugment()) {
+            fb.state = 'exploding';
+            fb.velocity.set(0, 0, 0);
+            fb.explosionElapsed = 0;
+            fb.mesh.position.copy(state.wildlifePositions[w]);
+            applyExplosionDamage(fb.mesh.position, state, getDmg, getRadius, callbacks);
+          } else {
+            callbacks.damageWildlife(w, getDmg());
+            scene.remove(fb.mesh);
+            (fb.mesh.geometry as THREE.BufferGeometry).dispose();
+            (fb.mesh.material as THREE.Material).dispose();
+            fireballs.splice(i, 1);
+          }
+          break;
+        }
+      }
     }
   }
 
@@ -384,6 +436,34 @@ export function createRocks(
       }
       if (i >= rocks.length) continue;
 
+      const penRockR = state.penRatSize / 2 + ROCK_RADIUS;
+      for (let p = 0; p < state.penRatPositions.length; p++) {
+        if (!state.penRatAlive[p] || !state.penRatAttackable[p]) continue;
+        if (rock.mesh.position.distanceTo(state.penRatPositions[p]) < penRockR) {
+          callbacks.damagePenRat(p, dmg);
+          scene.remove(rock.mesh);
+          (rock.mesh.geometry as THREE.BufferGeometry).dispose();
+          (rock.mesh.material as THREE.Material).dispose();
+          rocks.splice(i, 1);
+          break;
+        }
+      }
+      if (i >= rocks.length) continue;
+
+      for (let w = 0; w < state.wildlifePositions.length; w++) {
+        if (!state.wildlifeAlive[w] || !state.wildlifeAttackable[w]) continue;
+        const wildRockR = state.wildlifeHitRadius[w] + ROCK_RADIUS;
+        if (rock.mesh.position.distanceTo(state.wildlifePositions[w]) < wildRockR) {
+          callbacks.damageWildlife(w, dmg);
+          scene.remove(rock.mesh);
+          (rock.mesh.geometry as THREE.BufferGeometry).dispose();
+          (rock.mesh.material as THREE.Material).dispose();
+          rocks.splice(i, 1);
+          break;
+        }
+      }
+      if (i >= rocks.length) continue;
+
       if (state.bossAlive && rock.mesh.position.distanceTo(state.bossPosition) < state.bossHitboxRadius + ROCK_RADIUS) {
         callbacks.damageBoss(dmg);
         scene.remove(rock.mesh);
@@ -512,6 +592,34 @@ export function createArrows(
         if (!state.teleporterAlive[t]) continue;
         if (arrow.mesh.position.distanceTo(state.teleporterPositions[t]) < teleporterRadius) {
           callbacks.damageTeleporter(t, dmg);
+          scene.remove(arrow.mesh);
+          (arrow.mesh.geometry as THREE.BufferGeometry).dispose();
+          (arrow.mesh.material as THREE.Material).dispose();
+          arrows.splice(i, 1);
+          break;
+        }
+      }
+      if (i >= arrows.length) continue;
+
+      const penArrowR = state.penRatSize / 2 + ARROW_RADIUS;
+      for (let p = 0; p < state.penRatPositions.length; p++) {
+        if (!state.penRatAlive[p] || !state.penRatAttackable[p]) continue;
+        if (arrow.mesh.position.distanceTo(state.penRatPositions[p]) < penArrowR) {
+          callbacks.damagePenRat(p, dmg);
+          scene.remove(arrow.mesh);
+          (arrow.mesh.geometry as THREE.BufferGeometry).dispose();
+          (arrow.mesh.material as THREE.Material).dispose();
+          arrows.splice(i, 1);
+          break;
+        }
+      }
+      if (i >= arrows.length) continue;
+
+      for (let w = 0; w < state.wildlifePositions.length; w++) {
+        if (!state.wildlifeAlive[w] || !state.wildlifeAttackable[w]) continue;
+        const wildArrowR = state.wildlifeHitRadius[w] + ARROW_RADIUS;
+        if (arrow.mesh.position.distanceTo(state.wildlifePositions[w]) < wildArrowR) {
+          callbacks.damageWildlife(w, dmg);
           scene.remove(arrow.mesh);
           (arrow.mesh.geometry as THREE.BufferGeometry).dispose();
           (arrow.mesh.material as THREE.Material).dispose();

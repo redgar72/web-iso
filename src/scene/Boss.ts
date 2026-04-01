@@ -168,6 +168,7 @@ export function createBoss(
 
   bossMesh = createBossMesh();
   bossGroup.add(bossMesh);
+  bossGroup.visible = false;
   scene.add(bossGroup);
 
   return {
@@ -192,6 +193,7 @@ export function createBoss(
       if (health <= 0) {
         callbacks.onDeath(BOSS_POSITION.clone());
         if (bossMesh) bossGroup.remove(bossMesh);
+        bossGroup.visible = false;
         alive = false;
         return true;
       }
@@ -206,6 +208,7 @@ export function createBoss(
       }
       if (!alive) {
         alive = true;
+        bossGroup.visible = true;
         health = MAX_BOSS_HEALTH;
         lastBossFireballTime = -999;
       }
