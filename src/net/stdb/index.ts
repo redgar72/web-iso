@@ -48,12 +48,16 @@ import MoveReducer from "./move_reducer";
 export { MoveReducer };
 import EmitHitSplatReducer from "./emit_hit_splat_reducer";
 export { EmitHitSplatReducer };
+import SendChatReducer from "./send_chat_reducer";
+export { SendChatReducer };
 import TerrainEditReducer from "./terrain_edit_reducer";
 export { TerrainEditReducer };
 
 // Import and reexport all procedure arg types
 
 // Import and reexport all table handle types
+import ChatMessageRow from "./chat_message_table";
+export { ChatMessageRow };
 import HitSplatRow from "./hit_splat_table";
 export { HitSplatRow };
 import IdGenRow from "./id_gen_table";
@@ -72,6 +76,8 @@ import WorldStateRow from "./world_state_table";
 export { WorldStateRow };
 
 // Import and reexport all types
+import ChatMessage from "./chat_message_type";
+export { ChatMessage };
 import EmitHitSplat from "./emit_hit_splat_type";
 export { EmitHitSplat };
 import HitSplat from "./hit_splat_type";
@@ -94,6 +100,8 @@ import RegisterAccount from "./register_account_type";
 export { RegisterAccount };
 import RunServerTick from "./run_server_tick_type";
 export { RunServerTick };
+import SendChat from "./send_chat_type";
+export { SendChat };
 import TerrainChunk from "./terrain_chunk_type";
 export { TerrainChunk };
 import TerrainEdit from "./terrain_edit_type";
@@ -109,6 +117,17 @@ export { WorldState };
 
 /** The schema information for all tables in this module. This is defined the same was as the tables would have been defined in the server. */
 const tablesSchema = __schema(
+  __table({
+    name: 'chat_message',
+    indexes: [
+      { name: 'id', algorithm: 'btree', columns: [
+        'id',
+      ] },
+    ],
+    constraints: [
+      { name: 'chat_message_id_key', constraint: 'unique', columns: ['id'] },
+    ],
+  }, ChatMessageRow),
   __table({
     name: 'hit_splat',
     indexes: [
@@ -212,6 +231,7 @@ const reducersSchema = __reducers(
   __reducerSchema("run_server_tick", RunServerTickReducer),
   __reducerSchema("move", MoveReducer),
   __reducerSchema("emit_hit_splat", EmitHitSplatReducer),
+  __reducerSchema("send_chat", SendChatReducer),
   __reducerSchema("terrain_edit", TerrainEditReducer),
 );
 

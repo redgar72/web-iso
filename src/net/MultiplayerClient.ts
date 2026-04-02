@@ -19,6 +19,8 @@ export interface MultiplayerHandlers {
   onSpacetimeSubscriptionApplied?: () => void;
   /** SpacetimeDB: connection handshake failed (e.g. invalid token). */
   onSpacetimeConnectError?: (message: string) => void;
+  /** SpacetimeDB: row inserted into `chat_message`. */
+  onSpacetimeChat?: (fromPublicId: number, text: string) => void;
 }
 
 export class MultiplayerClient {

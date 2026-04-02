@@ -165,6 +165,36 @@ const clickOverlay = document.createElement('div');
 clickOverlay.style.cssText = 'position:absolute;inset:0;z-index:1;';
 container.appendChild(clickOverlay);
 
+/** Screen-space ripples for left-clicks on the scene (below HUD menus). */
+const clickRippleLayer = document.createElement('div');
+clickRippleLayer.style.cssText = 'position:absolute;inset:0;z-index:4;pointer-events:none;overflow:hidden;';
+container.appendChild(clickRippleLayer);
+
+type SceneClickRippleKind = 'walk' | 'interact';
+
+function spawnSceneClickRipple(clientX: number, clientY: number, kind: SceneClickRippleKind): void {
+  const rect = container.getBoundingClientRect();
+  const x = clientX - rect.left;
+  const y = clientY - rect.top;
+  const ring = document.createElement('div');
+  const stroke =
+    kind === 'walk'
+      ? 'rgba(100, 180, 255, 0.95)'
+      : 'rgba(255, 95, 95, 0.95)';
+  ring.style.cssText =
+    `position:absolute;left:${x}px;top:${y}px;width:14px;height:14px;margin:-7px 0 0 -7px;` +
+    `border-radius:50%;border:2px solid ${stroke};box-sizing:border-box;` +
+    'pointer-events:none;will-change:transform,opacity;';
+  clickRippleLayer.appendChild(ring);
+  ring.animate(
+    [
+      { transform: 'scale(0.35)', opacity: 1 },
+      { transform: 'scale(3.2)', opacity: 0 },
+    ],
+    { duration: 420, easing: 'cubic-bezier(0.2, 0.75, 0.35, 1)' }
+  ).onfinish = () => ring.remove();
+}
+
 let glContextLost = false;
 const contextLostEl = document.createElement('div');
 contextLostEl.id = 'context-lost';
@@ -334,6 +364,49 @@ chatMessagesEl.id = 'chat-messages';
 chatSectionEl.appendChild(chatTitleEl);
 chatSectionEl.appendChild(chatMessagesEl);
 container.appendChild(chatSectionEl);
+
+const chatInputEl = document.createElement('input');
+chatInputEl.id = 'chat-input';
+chatInputEl.type = 'text';
+chatInputEl.autocomplete = 'off';
+chatInputEl.spellcheck = true;
+chatInputEl.maxLength = 220;
+chatInputEl.style.cssText =
+  'display:none;width:100%;box-sizing:border-box;padding:6px 8px;border:none;border-top:1px solid rgba(255,255,255,0.12);background:rgba(0,0,0,0.5);color:#eee;font:12px sans-serif;outline:none';
+chatSectionEl.appendChild(chatInputEl);
+
+function isTypingInOtherFormField(target: EventTarget | null): boolean {
+  if (
+    !(
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement ||
+      target instanceof HTMLSelectElement
+    )
+  ) {
+    return false;
+  }
+  return target !== chatInputEl;
+}
+
+function spacetimeLoginOverlayBlocksChat(): boolean {
+  const el = document.getElementById('spacetime-login-overlay');
+  if (!el) return false;
+  return getComputedStyle(el).display !== 'none';
+}
+
+function setChatOpen(open: boolean): void {
+  chatSectionEl.style.borderColor = open ? 'rgba(120,170,255,0.45)' : 'rgba(255,255,255,0.15)';
+  chatSectionEl.style.pointerEvents = open ? 'auto' : 'none';
+  if (open) {
+    chatInputEl.style.display = 'block';
+    chatTitleEl.textContent = 'Chat — Enter to send, Esc to close';
+    queueMicrotask(() => chatInputEl.focus());
+  } else {
+    chatInputEl.blur();
+    chatInputEl.style.display = 'none';
+    chatTitleEl.textContent = 'Chat';
+  }
+}
 
 function addChatMessage(text: string): void {
   const msg = document.createElement('div');
@@ -1899,20 +1972,20 @@ function isAtTrainingDummyMeleeStand(): boolean {
   return areOrthogonallyAdjacent(pt, TRAINING_DUMMY_TILE);
 }
 
-function setMoveTargetFromMouse(clientX: number, clientY: number): void {
+function setMoveTargetFromMouse(clientX: number, clientY: number): SceneClickRippleKind | null {
   const rect = canvas.getBoundingClientRect();
   pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
   pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
   raycaster.setFromCamera(pointer, followCamera.three);
 
   const picks = mergePickIntersections(raycaster);
-  if (picks.length === 0) return;
+  if (picks.length === 0) return null;
   const top = picks[0];
 
   const groundPickHit = groundItemsApi.resolveGroundItemFromIntersection(top);
   if (groundPickHit) {
     requestWalkOrPickupGroundItem(groundPickHit.id);
-    return;
+    return 'interact';
   }
 
   const ratPickIdx = penRatIndexFromIntersection(top);
@@ -1920,7 +1993,7 @@ function setMoveTargetFromMouse(clientX: number, clientY: number): void {
     clearGatheringTarget();
     attackTarget = { type: 'pen_rat', index: ratPickIdx };
     clearTileMovement();
-    return;
+    return 'interact';
   }
 
   const wildlifePickIdx = startingWildlifeIndexFromIntersection(top);
@@ -1932,12 +2005,12 @@ function setMoveTargetFromMouse(clientX: number, clientY: number): void {
     clearGatheringTarget();
     attackTarget = { type: 'starting_wildlife', index: wildlifePickIdx };
     clearTileMovement();
-    return;
+    return 'interact';
   }
 
   if (isObjectUnderAncestor(top.object, pathfindingDemoPenRoot)) {
     handlePathfindingPenBarrierClick();
-    return;
+    return 'interact';
   }
 
   const gClickIdx = gatheringNodeIndexFromIntersection(top);
@@ -1946,7 +2019,7 @@ function setMoveTargetFromMouse(clientX: number, clientY: number): void {
     if (gatheringTargetNodeIndex !== gClickIdx) gatherHarvestTickCounter = 0;
     gatheringTargetNodeIndex = gClickIdx;
     pathToClosestOrthTileTowardGatheringNode(gClickIdx);
-    return;
+    return 'interact';
   }
 
   const groundPoint = top.point;
@@ -1959,7 +2032,7 @@ function setMoveTargetFromMouse(clientX: number, clientY: number): void {
       clearGatheringTarget();
       attackTarget = { type: 'training_dummy', index: 0 };
       pathToClosestOrthTileTowardDummy();
-      return;
+      return 'interact';
     }
   }
 
@@ -1970,7 +2043,7 @@ function setMoveTargetFromMouse(clientX: number, clientY: number): void {
       clearGatheringTarget();
       attackTarget = { type: 'pen_rat', index: ri };
       clearTileMovement();
-      return;
+      return 'interact';
     }
   }
 
@@ -1981,7 +2054,7 @@ function setMoveTargetFromMouse(clientX: number, clientY: number): void {
       clearGatheringTarget();
       attackTarget = { type: 'starting_wildlife', index: wi };
       clearTileMovement();
-      return;
+      return 'interact';
     }
   }
 
@@ -1994,7 +2067,7 @@ function setMoveTargetFromMouse(clientX: number, clientY: number): void {
       clearGatheringTarget();
       attackTarget = { type: 'enemy', index: j };
       clearTileMovement(); // Clear move target when attacking
-      return;
+      return 'interact';
     }
   }
   
@@ -2006,7 +2079,7 @@ function setMoveTargetFromMouse(clientX: number, clientY: number): void {
       clearGatheringTarget();
       attackTarget = { type: 'caster', index: c };
       clearTileMovement();
-      return;
+      return 'interact';
     }
   }
   
@@ -2018,7 +2091,7 @@ function setMoveTargetFromMouse(clientX: number, clientY: number): void {
       clearGatheringTarget();
       attackTarget = { type: 'resurrector', index: r };
       clearTileMovement();
-      return;
+      return 'interact';
     }
   }
 
@@ -2030,7 +2103,7 @@ function setMoveTargetFromMouse(clientX: number, clientY: number): void {
       clearGatheringTarget();
       attackTarget = { type: 'teleporter', index: t };
       clearTileMovement();
-      return;
+      return 'interact';
     }
   }
   
@@ -2041,13 +2114,14 @@ function setMoveTargetFromMouse(clientX: number, clientY: number): void {
       clearGatheringTarget();
       attackTarget = { type: 'boss', index: 0 };
       clearTileMovement();
-      return;
+      return 'interact';
     }
   }
   
   // If no monster clicked, path to clicked tile (center), OSRS-style BFS + 2-tile legs
   attackTarget = null; // Clear attack target when clicking terrain
   walkToGroundPoint(groundPoint);
+  return 'walk';
 }
 
 function walkToGroundPoint(p: THREE.Vector3): void {
@@ -2487,7 +2561,8 @@ clickOverlay.addEventListener('mousedown', (e) => {
     tryTerrainEditPaint(e.clientX, e.clientY);
     return;
   }
-  setMoveTargetFromMouse(e.clientX, e.clientY);
+  const ripple = setMoveTargetFromMouse(e.clientX, e.clientY);
+  if (ripple) spawnSceneClickRipple(e.clientX, e.clientY, ripple);
 });
 
 clickOverlay.addEventListener('mousemove', (e) => {
@@ -2795,6 +2870,8 @@ function updateAutoAttack(dt: number, gameTime: number): void {
     const targetDir = new THREE.Vector3(dx, 0, dz).normalize();
     playerLogicalHitOrigin.set(pCenter.x, 0, pCenter.z);
     performMeleeAttack(gameTime, targetDir, playerLogicalHitOrigin);
+    // Melee may kill the target synchronously (combat callbacks clear `attackTarget`).
+    if (attackTarget === null) return;
     // Keep tile movement so the avatar keeps lerping while the swing plays on the mesh.
     // Check if target died from the attack
     if (attackTarget.type === 'enemy' && !enemyAlive[attackTarget.index]) {
@@ -3554,6 +3631,21 @@ function throwRock(gameTime: number): void {
 }
 
 document.addEventListener('keydown', (e) => {
+  if (document.activeElement === chatInputEl) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      setChatOpen(false);
+    }
+    return;
+  }
+  if (e.key === 'Enter') {
+    if (isTypingInOtherFormField(e.target)) return;
+    if (terrainEditPanel.isOpen()) return;
+    if (spacetimeLoginOverlayBlocksChat()) return;
+    e.preventDefault();
+    setChatOpen(true);
+    return;
+  }
   if (e.key === 'F4') {
     e.preventDefault();
     terrainEditPanel.toggle();
@@ -4058,13 +4150,42 @@ let spacetimeSessionReady = !useSpacetimeMp;
 let remountSpacetimeLoginForm: (() => void) | null = null;
 let beginSpacetimeAccountSwitch: (() => void) | null = null;
 
+function trySubmitChat(): void {
+  const raw = chatInputEl.value;
+  chatInputEl.value = '';
+  const text = raw.trim();
+  if (!text) {
+    setChatOpen(false);
+    return;
+  }
+  const c = multiplayerClient;
+  if (!(c instanceof SpacetimeMultiplayerClient)) {
+    addChatMessage('Chat requires SpacetimeDB multiplayer.');
+    return;
+  }
+  if (!useSpacetimeMp || !spacetimeSessionReady) {
+    addChatMessage('Sign in to multiplayer to use chat.');
+    return;
+  }
+  c.sendChat(text);
+}
+
+chatInputEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    trySubmitChat();
+  }
+});
+
 let remotePlayersApi: ReturnType<typeof createRemotePlayers> | null = null;
 let multiplayerFirstSnap = true;
 let lastMultiplayerSentTile: GridTile | null = null;
 let lastMultiplayerSentGoal: GridTile | null = null;
+let multiplayerSelfPublicId: number | null = null;
 
 const multiplayerHandlers: MultiplayerHandlers = {
-  onWelcome() {
+  onWelcome(playerId) {
+    multiplayerSelfPublicId = playerId;
     if (useSpacetimeMp) {
       if (spacetimeRequireResumeConfirm) {
         return;
@@ -4075,6 +4196,7 @@ const multiplayerHandlers: MultiplayerHandlers = {
   },
   onSpacetimeConnectError(msg) {
     console.warn('[spacetimedb] connect error:', msg);
+    multiplayerSelfPublicId = null;
     spacetimeRequireResumeConfirm = false;
     spacetimeSessionReady = false;
     const c = multiplayerClient;
@@ -4086,15 +4208,17 @@ const multiplayerHandlers: MultiplayerHandlers = {
     document.getElementById('spacetime-login-overlay')?.style.setProperty('display', 'flex');
   },
   onSnap(msg) {
-    if (useSpacetimeMp && !spacetimeSessionReady) return;
-    if (multiplayerFirstSnap) {
-      multiplayerFirstSnap = false;
-      lastMultiplayerSentTile = null;
-      lastMultiplayerSentGoal = null;
-      character.position.set(msg.self.x, samplePlayerGroundY(msg.self.x, msg.self.z), msg.self.z);
-      snapCharacterXZToNearestWalkable();
-      snapCharacterYToTerrain();
-      clearTileMovement();
+    const mpAwaitingSessionUi = useSpacetimeMp && !spacetimeSessionReady;
+    if (!mpAwaitingSessionUi) {
+      if (multiplayerFirstSnap) {
+        multiplayerFirstSnap = false;
+        lastMultiplayerSentTile = null;
+        lastMultiplayerSentGoal = null;
+        character.position.set(msg.self.x, samplePlayerGroundY(msg.self.x, msg.self.z), msg.self.z);
+        snapCharacterXZToNearestWalkable();
+        snapCharacterYToTerrain();
+        clearTileMovement();
+      }
     }
     remotePlayersApi!.ingestSnap(msg.peers);
   },
@@ -4119,6 +4243,13 @@ const multiplayerHandlers: MultiplayerHandlers = {
   onSpacetimeSubscriptionApplied() {
     const t = getPlayerPathTile();
     void chunkTerrainLoader.syncToWorldTile(t.x, t.z);
+  },
+  onSpacetimeChat(fromPublicId, text) {
+    const selfLabel =
+      multiplayerSelfPublicId !== null && fromPublicId === multiplayerSelfPublicId
+        ? localStorage.getItem(SPACETIME_USERNAME_KEY) ?? 'You'
+        : `#${fromPublicId}`;
+    addChatMessage(`${selfLabel}: ${text}`);
   },
 };
 
@@ -4148,11 +4279,13 @@ function setupSpacetimeLoginGate(spacetimeClient: SpacetimeMultiplayerClient): v
     spacetimeSessionReady = true;
     spacetimeRequireResumeConfirm = false;
     overlay.style.setProperty('display', 'none');
+    spacetimeClient.refreshSnapFromCache();
   }
 
   function beginAccountSwitch(): void {
     spacetimeRequireResumeConfirm = false;
     spacetimeSessionReady = false;
+    multiplayerSelfPublicId = null;
     multiplayerFirstSnap = true;
     spacetimeClient.logout();
     mountLoginForm();
@@ -4233,6 +4366,7 @@ function setupSpacetimeLoginGate(spacetimeClient: SpacetimeMultiplayerClient): v
           await spacetimeClient.loginWithPassword(username, password);
         }
         localStorage.setItem(SPACETIME_USERNAME_KEY, username.trim().toLowerCase());
+        spacetimeClient.refreshSnapFromCache();
       } catch (e) {
         statusEl().textContent = e instanceof Error ? e.message : String(e);
       } finally {
@@ -4258,7 +4392,9 @@ function setupSpacetimeLoginGate(spacetimeClient: SpacetimeMultiplayerClient): v
 }
 
 if (spacetimeUriRaw.length > 0) {
-  remotePlayersApi = createRemotePlayers();
+  remotePlayersApi = createRemotePlayers({
+    getGroundY: (x, z) => chunkTerrainLoader.sampleSurfaceHeightAtWorldXZ(x, z),
+  });
   scene.add(remotePlayersApi.group);
   const spacetimeClient = new SpacetimeMultiplayerClient(
     {
@@ -4289,7 +4425,9 @@ if (spacetimeUriRaw.length > 0) {
 
   spacetimeClient.connect();
 } else if (multiplayerUrl.length > 0) {
-  remotePlayersApi = createRemotePlayers();
+  remotePlayersApi = createRemotePlayers({
+    getGroundY: (x, z) => chunkTerrainLoader.sampleSurfaceHeightAtWorldXZ(x, z),
+  });
   scene.add(remotePlayersApi.group);
   multiplayerClient = new MultiplayerClient(multiplayerUrl, multiplayerHandlers);
   multiplayerClient.connect();
@@ -4497,7 +4635,7 @@ const CAM_PITCH_SPEED = 1.05;
 const gameLoop = new GameLoop(
   (dt) => {
     followCamera.setTarget(character.position.x, character.position.y, character.position.z);
-    if (!isPaused && !skillTreeOpen && !gameMenuOpen) {
+    if (!isPaused && !skillTreeOpen && !gameMenuOpen && document.activeElement !== chatInputEl) {
       if (cameraKeysHeld.has('a')) followCamera.addOrbitYaw(-CAM_ORBIT_SPEED * dt);
       if (cameraKeysHeld.has('d')) followCamera.addOrbitYaw(CAM_ORBIT_SPEED * dt);
       if (cameraKeysHeld.has('w')) followCamera.addPitch(CAM_PITCH_SPEED * dt);

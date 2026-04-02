@@ -20,8 +20,11 @@ export const CHUNK_LOAD_RADIUS_CHUNKS = 1;
 export const TERRAIN_GRID_WIDTH = CHUNK_SIZE * WORLD_CHUNK_COUNT_X;
 export const TERRAIN_GRID_DEPTH = CHUNK_SIZE * WORLD_CHUNK_COUNT_Z;
 
-/** Chebyshev tile distance — “square” AOI. */
-export const AOI_MAX_TILE_RADIUS = 10;
+/**
+ * Chebyshev tile distance — “square” AOI.
+ * Match full authored grid so distant spawns still replicate (still capped by {@link MAX_VISIBLE_PEERS}).
+ */
+export const AOI_MAX_TILE_RADIUS = Math.max(TERRAIN_GRID_WIDTH, TERRAIN_GRID_DEPTH);
 
 /** Max other players replicated to one client (server-enforced). */
 export const MAX_VISIBLE_PEERS = 20;

@@ -1,14 +1,9 @@
-import type { Infer } from 'spacetimedb';
-import { affectedChunkKeysForTerrainBrush } from '../../shared/chunkTerrainMutations';
+import { Identity, type Infer } from 'spacetimedb';
 import type { TerrainPaintMode } from '../../shared/terrainBrush';
-import {
-  AOI_MAX_TILE_RADIUS,
-  MAX_VISIBLE_PEERS,
-  chebyshevTileDist,
-  tileCenterXZ,
-} from '../../shared/world';
+import { MAX_VISIBLE_PEERS, tileCenterXZ } from '../../shared/world';
 import type { NetPeer, ServerMsg } from '../../shared/protocol';
 import { DbConnection, type EventContext, type ReducerEventContext } from './stdb';
+import ChatMessageTbl from './stdb/chat_message_table';
 import HitSplatTbl from './stdb/hit_splat_table';
 import PlayerTbl from './stdb/player_table';
 import TerrainChunkTbl from './stdb/terrain_chunk_table';
@@ -17,6 +12,7 @@ import type { MultiplayerHandlers } from './MultiplayerClient';
 type PlayerRow = Infer<typeof PlayerTbl>;
 type HitSplatRow = Infer<typeof HitSplatTbl>;
 type TerrainChunkRow = Infer<typeof TerrainChunkTbl>;
+type ChatMessageRow = Infer<typeof ChatMessageTbl>;
 
 /** {@link DbConnectionImpl.isActive} — WebSocket is OPEN; safe to call reducers. */
 type DbConnectionWithActive = DbConnection & { isActive: boolean };
@@ -30,31 +26,46 @@ export interface SpacetimeMultiplayerConfig {
   usernameStorageKey?: string;
 }
 
+/** BSATN may decode `u32` as `number` or `bigint`; normalize before `Math.abs` / equality checks. */
+function asU32(v: unknown): number {
+  if (typeof v === 'bigint') return Number(v);
+  return Math.floor(Number(v));
+}
+
+function normalizeIdentityHex(hex: string): string {
+  return hex.replace(/^0x/i, '').toLowerCase();
+}
+
+/** Resolve row `owner` to hex — BSATN / client cache may use `Identity` or `{ __identity__: bigint }`. */
+function rowOwnerHex(owner: unknown): string | null {
+  if (owner == null) return null;
+  if (typeof owner === 'object') {
+    const o = owner as { toHexString?: () => string; __identity__?: bigint };
+    if (typeof o.toHexString === 'function') {
+      return normalizeIdentityHex(o.toHexString());
+    }
+    if (typeof o.__identity__ === 'bigint') {
+      return normalizeIdentityHex(new Identity(o.__identity__).toHexString());
+    }
+  }
+  return null;
+}
+
 function peerDto(p: PlayerRow): NetPeer {
-  const { x, z } = tileCenterXZ(p.tx, p.tz);
+  const tx = asU32(p.tx);
+  const tz = asU32(p.tz);
+  const goalTx = asU32(p.goalTx);
+  const goalTz = asU32(p.goalTz);
+  const { x, z } = tileCenterXZ(tx, tz);
   return {
-    id: p.publicId,
-    tx: p.tx,
-    tz: p.tz,
-    goalTx: p.goalTx,
-    goalTz: p.goalTz,
+    id: asU32(p.publicId),
+    tx,
+    tz,
+    goalTx,
+    goalTz,
     x,
     z,
   };
-}
-
-function visiblePeers(self: PlayerRow, everyone: PlayerRow[]): NetPeer[] {
-  const candidates = everyone.filter(
-    (o) =>
-      o.publicId !== self.publicId &&
-      chebyshevTileDist(self, o) <= AOI_MAX_TILE_RADIUS
-  );
-  candidates.sort(
-    (a, b) =>
-      chebyshevTileDist(self, a) - chebyshevTileDist(self, b) ||
-      a.publicId - b.publicId
-  );
-  return candidates.slice(0, MAX_VISIBLE_PEERS).map(peerDto);
 }
 
 export class SpacetimeMultiplayerClient {
@@ -65,6 +76,8 @@ export class SpacetimeMultiplayerClient {
   /** Latest known public id for this connection (set once `player` row exists). */
   private selfPublicId: number | null = null;
   private spacetimeSnapshotNotified = false;
+  /** Dedupe UI chat lines when syncing from cache vs `onInsert` callbacks. */
+  private seenChatMessageIds = new Set<string>();
 
   constructor(
     private readonly config: SpacetimeMultiplayerConfig,
@@ -102,6 +115,7 @@ export class SpacetimeMultiplayerClient {
         this.welcomeSent = false;
         this.selfPublicId = null;
         this.spacetimeSnapshotNotified = false;
+        this.seenChatMessageIds.clear();
       })
       .onConnectError((_ctx, err) => {
         console.warn('[spacetimedb]', err);
@@ -112,16 +126,18 @@ export class SpacetimeMultiplayerClient {
         );
       })
       .onConnect((conn, identity, token) => {
-        this.identityHex = identity.toHexString();
+        this.identityHex = normalizeIdentityHex(identity.toHexString());
         if (this.config.authTokenStorageKey && token) {
           localStorage.setItem(this.config.authTokenStorageKey, token);
         }
         this.welcomeSent = false;
         this.selfPublicId = null;
+        this.seenChatMessageIds.clear();
         this.attachRowCallbacks(conn);
         conn
           .subscriptionBuilder()
           .onApplied(() => {
+            this.syncChatFromCache(conn);
             this.emitWelcomeIfNeeded(conn);
             this.emitSnap(conn);
             this.syncAllTerrainChunks(conn);
@@ -135,6 +151,7 @@ export class SpacetimeMultiplayerClient {
             'SELECT * FROM world_state',
             'SELECT * FROM hit_splat',
             'SELECT * FROM terrain_chunk',
+            'SELECT * FROM chat_message',
           ]);
       })
       .build();
@@ -154,8 +171,11 @@ export class SpacetimeMultiplayerClient {
     conn.db.worldState.onUpdate((_ctx: EventContext, _old, _row) => {
       this.emitSnap(conn);
     });
+    conn.db.chatMessage.onInsert((_ctx: EventContext, row: ChatMessageRow) => {
+      this.emitChatRowIfNew(row);
+    });
     conn.db.hitSplat.onInsert((_ctx: EventContext, row: HitSplatRow) => {
-      if (this.selfPublicId !== null && row.fromPublicId === this.selfPublicId) {
+      if (this.selfPublicId !== null && asU32(row.fromPublicId) === this.selfPublicId) {
         return;
       }
       const msg: Extract<ServerMsg, { t: 'peerHitSplat' }> = {
@@ -176,16 +196,6 @@ export class SpacetimeMultiplayerClient {
         this.emitTerrainChunk(row);
       }
     );
-    conn.reducers.onTerrainEdit((ctx: ReducerEventContext, args) => {
-      if (ctx.event.status.tag !== 'Committed') return;
-      const keys = affectedChunkKeysForTerrainBrush(args.tx, args.tz, args.brushRadius);
-      for (const k of keys) {
-        const row = conn.db.terrainChunk.chunkKey.find(k);
-        if (row) {
-          this.emitTerrainChunk(row);
-        }
-      }
-    });
   }
 
   private syncAllTerrainChunks(conn: DbConnection): void {
@@ -194,14 +204,43 @@ export class SpacetimeMultiplayerClient {
     }
   }
 
+  private emitChatRowIfNew(row: ChatMessageRow): void {
+    const idKey = row.id.toString();
+    if (this.seenChatMessageIds.has(idKey)) return;
+    this.seenChatMessageIds.add(idKey);
+    this.handlers.onSpacetimeChat?.(row.fromPublicId, row.text);
+  }
+
+  /** Runs on each subscription apply; rows are already in the client cache (see SDK `SubscribeApplied` order). */
+  private syncChatFromCache(conn: DbConnection): void {
+    for (const row of conn.db.chatMessage.iter()) {
+      this.emitChatRowIfNew(row);
+    }
+  }
+
   private emitTerrainChunk(row: TerrainChunkRow): void {
     this.handlers.onTerrainChunkFromServer?.(row.chunkKey, row.json);
   }
 
   private findSelf(conn: DbConnection): PlayerRow | undefined {
+    const fromConn = conn.identity;
+    if (fromConn !== undefined) {
+      for (const p of conn.db.player.iter()) {
+        const ow = p.owner as Identity | null | undefined;
+        if (ow != null && typeof ow === 'object' && typeof ow.isEqual === 'function') {
+          try {
+            if (ow.isEqual(fromConn)) return p;
+          } catch {
+            /* ignore malformed row */
+          }
+        }
+      }
+    }
     if (this.identityHex === null) return undefined;
+    const target = this.identityHex;
     for (const p of conn.db.player.iter()) {
-      if (p.owner.toHexString() === this.identityHex) {
+      const h = rowOwnerHex(p.owner);
+      if (h !== null && h === target) {
         return p;
       }
     }
@@ -220,21 +259,26 @@ export class SpacetimeMultiplayerClient {
     const self = this.findSelf(conn);
     if (!self) return;
     this.welcomeSent = true;
-    this.selfPublicId = self.publicId;
+    this.selfPublicId = asU32(self.publicId);
     const tick = Number(this.currentTick(conn));
-    this.handlers.onWelcome?.(self.publicId, tick);
+    this.handlers.onWelcome?.(asU32(self.publicId), tick);
   }
 
   private emitSnap(conn: DbConnection): void {
     const self = this.findSelf(conn);
     if (!self) return;
-    this.selfPublicId = self.publicId;
+    this.selfPublicId = asU32(self.publicId);
     const everyone = [...conn.db.player.iter()];
+    const selfPid = asU32(self.publicId);
+    const peers = everyone
+      .filter((o) => asU32(o.publicId) !== selfPid)
+      .slice(0, MAX_VISIBLE_PEERS)
+      .map(peerDto);
     const msg: Extract<ServerMsg, { t: 'snap' }> = {
       t: 'snap',
       tick: Number(this.currentTick(conn)),
       self: peerDto(self),
-      peers: visiblePeers(self, everyone),
+      peers,
     };
     this.handlers.onSnap?.(msg);
   }
@@ -270,6 +314,17 @@ export class SpacetimeMultiplayerClient {
     });
   }
 
+  sendChat(text: string): void {
+    this.conn?.reducers.sendChat({ text });
+  }
+
+  /** Push latest `player` / `world_state` snapshot to handlers (e.g. when login overlay closes). */
+  refreshSnapFromCache(): void {
+    const c = this.conn;
+    if (c === null) return;
+    this.emitSnap(c);
+  }
+
   disconnect(): void {
     this.conn?.disconnect();
     this.conn = null;
@@ -277,6 +332,7 @@ export class SpacetimeMultiplayerClient {
     this.welcomeSent = false;
     this.selfPublicId = null;
     this.spacetimeSnapshotNotified = false;
+    this.seenChatMessageIds.clear();
   }
 
   clearStoredAuthToken(): void {
@@ -334,7 +390,7 @@ export class SpacetimeMultiplayerClient {
         const handler = (ctx: ReducerEventContext, _args: { username: string; password: string }) => {
           if (
             this.identityHex === null ||
-            ctx.event.callerIdentity.toHexString() !== this.identityHex
+            normalizeIdentityHex(ctx.event.callerIdentity.toHexString()) !== this.identityHex
           ) {
             return;
           }

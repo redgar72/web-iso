@@ -6,6 +6,12 @@ import { tileCenterXZ } from '../../shared/world';
 const REMOTE_COLORS = [0x6eb5ff, 0xff8c6b, 0x9bffa8, 0xe0b0ff, 0xffe08a];
 
 const STAND_PULL_PER_SECOND = 14;
+/** BoxGeometry height 1.2 → pivot at center; feet sit on ground at centerY − this. */
+const REMOTE_BOX_HALF_H = 0.6;
+
+export type RemotePlayersOptions = {
+  getGroundY?: (worldX: number, worldZ: number) => number;
+};
 
 type Entry = {
   mesh: THREE.Mesh;
@@ -18,27 +24,32 @@ type Entry = {
 /**
  * Remote players: chase `goal` at {@link CHARACTER_MOVE_SPEED} using latest auth tile as a floor along the segment to goal.
  */
-export function createRemotePlayers(): {
+export function createRemotePlayers(opts?: RemotePlayersOptions): {
   group: THREE.Group;
   ingestSnap(peers: NetPeer[]): void;
   updateInterpolation(dt: number): void;
   dispose(): void;
   getMinimapPositions(): { x: number; z: number }[];
 } {
+  const groundY = opts?.getGroundY ?? ((_x: number, _z: number) => 0);
   const group = new THREE.Group();
   const geom = new THREE.BoxGeometry(0.7, 1.2, 0.7);
   const pool: THREE.Mesh[] = [];
   const freeMeshes: THREE.Mesh[] = [];
 
   for (let i = 0; i < 20; i++) {
+    const base = REMOTE_COLORS[i % REMOTE_COLORS.length]!;
     const mat = new THREE.MeshStandardMaterial({
-      color: REMOTE_COLORS[i % REMOTE_COLORS.length],
-      roughness: 0.7,
-      metalness: 0.05,
+      color: base,
+      roughness: 0.65,
+      metalness: 0.06,
+      /** Scene fog (far≈180) was hiding remotes across the 384-unit world from the camera. */
+      fog: false,
+      emissive: new THREE.Color(base).multiplyScalar(0.22),
     });
     const mesh = new THREE.Mesh(geom, mat);
     mesh.visible = false;
-    mesh.position.y = 0.6;
+    mesh.position.y = REMOTE_BOX_HALF_H;
     pool.push(mesh);
     freeMeshes.push(mesh);
     group.add(mesh);
@@ -62,14 +73,14 @@ export function createRemotePlayers(): {
 
   function ingestSnap(peers: NetPeer[]): void {
     const seen = new Set<number>();
-    const y = 0.6;
 
     for (const p of peers) {
       seen.add(p.id);
       let e = active.get(p.id);
+      const py = groundY(p.x, p.z) + REMOTE_BOX_HALF_H;
       if (!e) {
         const mesh = takeMesh();
-        mesh.position.set(p.x, y, p.z);
+        mesh.position.set(p.x, py, p.z);
         e = {
           mesh,
           authTx: p.tx,
@@ -83,6 +94,7 @@ export function createRemotePlayers(): {
         e.authTz = p.tz;
         e.goalTx = p.goalTx;
         e.goalTz = p.goalTz;
+        e.mesh.position.y = py;
       }
     }
 
@@ -94,7 +106,6 @@ export function createRemotePlayers(): {
   }
 
   function updateInterpolation(dt: number): void {
-    const y = 0.6;
     for (const e of active.values()) {
       const mesh = e.mesh;
       const auth = tileCenterXZ(e.authTx, e.authTz);
@@ -131,7 +142,8 @@ export function createRemotePlayers(): {
         }
       }
 
-      mesh.position.set(px, y, pz);
+      const py = groundY(px, pz) + REMOTE_BOX_HALF_H;
+      mesh.position.set(px, py, pz);
     }
   }
 

@@ -106,6 +106,16 @@ const HitSplat = table(
   }
 );
 
+const ChatMessage = table(
+  { name: 'chat_message', public: true },
+  {
+    id: t.u64().primaryKey().autoInc(),
+    fromPublicId: t.u32(),
+    tick: t.u64(),
+    text: t.string(),
+  }
+);
+
 export const spacetimedb = schema(
   WorldState,
   IdGen,
@@ -114,7 +124,8 @@ export const spacetimedb = schema(
   TickJob,
   TerrainStroke,
   TerrainChunk,
-  HitSplat
+  HitSplat,
+  ChatMessage
 );
 
 spacetimedb.init((ctx) => {
@@ -205,10 +216,12 @@ spacetimedb.clientConnected((ctx) => {
       ctx.db.terrainChunk.insert({ chunkKey, json });
     }
   }
-  /* Returning client with a saved token: recreate `player` row after `clientDisconnected` cleared it. */
-  if (credentialForSender(ctx)) {
-    ensurePlayerRow(ctx);
-  }
+  /*
+   * Every session needs a `player` row so reducers like `move`, `terrain_edit`, and `send_chat`
+   * can run. Anonymous clients have no `user_credentials` row yet; without this call, terrain
+   * edits would only apply locally and disappear on refresh.
+   */
+  ensurePlayerRow(ctx);
 });
 
 spacetimedb.clientDisconnected((ctx) => {
@@ -354,6 +367,23 @@ spacetimedb.reducer(
     });
   }
 );
+
+const CHAT_TEXT_MAX = 220;
+
+spacetimedb.reducer('send_chat', { text: t.string() }, (ctx, { text }) => {
+  const p = ctx.db.player.owner.find(ctx.sender);
+  if (!p) return;
+  const trimmed = text.trim().slice(0, CHAT_TEXT_MAX);
+  if (!trimmed) return;
+  const ws = ctx.db.worldState.id.find(0);
+  const tick = ws ? ws.tick : 0n;
+  ctx.db.chatMessage.insert({
+    id: 0n,
+    fromPublicId: p.publicId,
+    tick,
+    text: trimmed,
+  });
+});
 
 spacetimedb.reducer(
   'terrain_edit',
