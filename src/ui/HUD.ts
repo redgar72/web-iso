@@ -175,10 +175,10 @@ export function createHUD(container: HTMLElement, config: HUDConfig): HUDAPI {
   levelXpEl.appendChild(levelLabel);
   levelXpEl.appendChild(xpBarWrap);
 
-  const skillTreeHintBar = document.createElement('div');
-  skillTreeHintBar.textContent =
-    'Space — Melee  |  K — Skill tree  |  I — Menu  |  RMB — Menu  |  Shift+RMB — Fireball';
-  skillTreeHintBar.style.cssText = 'font:10px sans-serif;color:rgba(255,255,255,0.5);margin-top:4px;';
+  const controlsHintBar = document.createElement('div');
+  controlsHintBar.textContent =
+    'Space — Melee  |  K — Skills  |  I — Menu  |  RMB — Context menu';
+  controlsHintBar.style.cssText = 'font:10px sans-serif;color:rgba(255,255,255,0.5);margin-top:4px;';
 
   const runEnergyLabel = document.createElement('div');
   runEnergyLabel.style.cssText = 'font:11px sans-serif;color:rgba(255,255,255,0.75);margin-top:8px;';
@@ -214,7 +214,7 @@ export function createHUD(container: HTMLElement, config: HUDConfig): HUDAPI {
   barsEl.appendChild(runEnergyLabel);
   barsEl.appendChild(runEnergyBarWrap);
   barsEl.appendChild(runBtn);
-  barsEl.appendChild(skillTreeHintBar);
+  barsEl.appendChild(controlsHintBar);
   barsEl.appendChild(waveLabelEl);
   barsEl.appendChild(waveEl);
   container.appendChild(barsEl);

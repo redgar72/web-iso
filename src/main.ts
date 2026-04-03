@@ -35,20 +35,6 @@ import { buildWaterTileIndicatorGeometry } from './scene/waterTileIndicators';
 import { ENEMY_COUNT, ENEMY_SIZE, killEnemyInstance, resurrectEnemyInstance } from './scene/Enemies';
 import { rollDrop, type MonsterType } from './drops/DropTables';
 import { createPlaceholderCharacter } from './character/loadFbxCharacter';
-import {
-  isSkillUnlocked,
-  isAugmentUnlocked,
-  addSkillPoint,
-  getSkillPoints,
-  canUnlockSkill,
-  unlockSkill,
-  canUnlockAugment,
-  unlockAugment,
-  getAugmentsForSkill,
-  SKILL_TREE,
-  type SkillId,
-  type AugmentId,
-} from './skills/SkillTree';
 import { createWaves, FRESH_GRID_MODE } from './game/Waves';
 import { createEquipment } from './state/Equipment';
 import { createInventory, INVENTORY_SLOTS } from './state/Inventory';
@@ -66,14 +52,9 @@ import {
   type EquipmentSlotId,
 } from './items/ItemTypes';
 import { createSword } from './combat/Sword';
-import { createFireballs, createRocks, createArrows } from './combat/Projectiles';
+import { createArrows } from './combat/Projectiles';
 import type { CombatState } from './combat/types';
 import {
-  SWORD_ORBIT_RADIUS,
-  SWORD_HIT_RADIUS,
-  SWORD_HIT_COOLDOWN,
-  FIREBALL_RADIUS as CONST_FIREBALL_RADIUS,
-  EXPLOSION_MAX_SCALE as CONST_EXPLOSION_MAX_SCALE,
   TELEPORTER_COUNT,
   TELEPORTER_SIZE,
   TELEPORTER_TELEPORT_RANGE,
@@ -240,7 +221,6 @@ let runTime = 0;
 const BASE_MAX_HEALTH = 100;
 const MAX_MANA = 100;
 let mana = MAX_MANA;
-const FIREBALL_MANA_COST = 18;
 
 // Character base stats (at 10 = 100% of base)
 let strength = 10;     // melee damage
@@ -510,7 +490,7 @@ function respawn(): void {
 
 respawnBtn.addEventListener('click', respawn);
 
-/** Called when player levels up (e.g. to open skill tree or show notification). */
+/** Called when player levels up (e.g. to open character sheet for stat points). */
 const levelUpNotifier: { callback: (() => void) | null } = { callback: null };
 
 // Pause state & overlay
@@ -528,199 +508,6 @@ pauseHint.style.cssText = 'font:14px sans-serif;color:rgba(255,255,255,0.7);';
 pauseEl.appendChild(pauseTitle);
 pauseEl.appendChild(pauseHint);
 container.appendChild(pauseEl);
-
-// Skill tree panel (K to open/close)
-const skillTreeEl = document.createElement('div');
-skillTreeEl.id = 'skill-tree';
-skillTreeEl.style.cssText =
-  'position:absolute;inset:0;z-index:18;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,0.7);backdrop-filter:blur(4px);';
-const skillTreePanel = document.createElement('div');
-skillTreePanel.style.cssText =
-  'background:linear-gradient(180deg,#2a2630 0%,#1e1a24 100%);border:2px solid rgba(255,255,255,0.2);border-radius:12px;padding:24px;min-width:320px;max-width:90vw;box-shadow:0 8px 32px rgba(0,0,0,0.5);';
-const skillTreeTitle = document.createElement('div');
-skillTreeTitle.textContent = 'Skill Tree';
-skillTreeTitle.style.cssText = 'font:20px sans-serif;color:#e8e0e0;font-weight:bold;margin-bottom:8px;';
-const skillTreeTabs = document.createElement('div');
-skillTreeTabs.style.cssText = 'display:flex;gap:8px;margin-bottom:16px;';
-const skillTreeStatAllocEl = document.createElement('div');
-skillTreeStatAllocEl.style.cssText = 'margin-bottom:16px;';
-const skillTreePoints = document.createElement('div');
-skillTreePoints.style.cssText = 'font:12px sans-serif;color:#a0c0a0;margin-bottom:16px;';
-const skillTreeList = document.createElement('div');
-skillTreeList.style.cssText = 'display:flex;flex-direction:column;gap:10px;';
-const skillTreeHint = document.createElement('div');
-skillTreeHint.textContent = 'Press K to close';
-skillTreeHint.style.cssText = 'font:11px sans-serif;color:rgba(255,255,255,0.5);margin-top:12px;';
-skillTreePanel.appendChild(skillTreeTitle);
-skillTreePanel.appendChild(skillTreeTabs);
-skillTreePanel.appendChild(skillTreeStatAllocEl);
-skillTreePanel.appendChild(skillTreePoints);
-skillTreePanel.appendChild(skillTreeList);
-skillTreePanel.appendChild(skillTreeHint);
-skillTreeEl.appendChild(skillTreePanel);
-
-let skillTreePage: SkillId = 'sword';
-function setSkillTreePage(page: SkillId): void {
-  skillTreePage = page;
-  renderSkillTree();
-}
-skillTreeEl.style.display = 'none';
-skillTreeEl.style.alignItems = 'center';
-skillTreeEl.style.justifyContent = 'center';
-container.appendChild(skillTreeEl);
-
-let skillTreeOpen = false;
-function setSkillTreeOpen(open: boolean): void {
-  skillTreeOpen = open;
-  skillTreeEl.style.display = open ? 'flex' : 'none';
-  if (open) {
-    setPaused(true);
-    renderSkillTree();
-  } else {
-    setPaused(false);
-  }
-}
-function allocateStat(stat: 'strength' | 'intelligence' | 'dexterity' | 'vitality'): void {
-  if (statPointsToAllocate <= 0) return;
-  statPointsToAllocate--;
-  if (stat === 'strength') strength++;
-  else if (stat === 'intelligence') intelligence++;
-  else if (stat === 'dexterity') dexterity++;
-  else {
-    const oldMax = getMaxHealth();
-    vitality++;
-    health = Math.min(health + (getMaxHealth() - oldMax), getMaxHealth());
-    setHealth(health); // refresh health bar
-  }
-  updateStatsDisplay();
-  renderSkillTree();
-}
-
-function renderSkillTree(): void {
-  skillTreeTitle.textContent = `Skill Tree — Level ${level}`;
-  // Tabs: one per skill page
-  skillTreeTabs.innerHTML = '';
-  const tabNames: { id: SkillId; label: string }[] = [
-    { id: 'sword', label: 'Sword' },
-    { id: 'rock', label: 'Rock' },
-    { id: 'fireball', label: 'Fireball' },
-  ];
-  for (const { id, label } of tabNames) {
-    const tab = document.createElement('button');
-    tab.textContent = label;
-    tab.style.cssText =
-      'padding:8px 16px;font:12px sans-serif;border-radius:8px;border:1px solid rgba(255,255,255,0.2);cursor:pointer;background:' +
-      (skillTreePage === id ? 'rgba(100,80,140,0.5);color:#e8e0e0;' : 'rgba(0,0,0,0.3);color:rgba(255,255,255,0.8);');
-    tab.addEventListener('click', () => setSkillTreePage(id));
-    skillTreeTabs.appendChild(tab);
-  }
-  // Stat allocation section
-  skillTreeStatAllocEl.innerHTML = '';
-  if (statPointsToAllocate > 0) {
-    const label = document.createElement('div');
-    label.style.cssText = 'font:12px sans-serif;color:#c0a060;margin-bottom:8px;';
-    label.textContent = `Stat points to allocate: ${statPointsToAllocate}`;
-    skillTreeStatAllocEl.appendChild(label);
-    const row = document.createElement('div');
-    row.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;';
-    const statColors: Record<'strength' | 'intelligence' | 'dexterity' | 'vitality', { top: string; bottom: string; text: string }> = {
-      strength: { top: '#d4af37', bottom: '#b8860b', text: '#2a2200' },
-      intelligence: { top: '#7dd3fc', bottom: '#38bdf8', text: '#0c1929' },
-      dexterity: { top: '#4ade80', bottom: '#22c55e', text: '#052e16' },
-      vitality: { top: '#f87171', bottom: '#dc2626', text: '#450a0a' },
-    };
-    const btn = (name: string, stat: 'strength' | 'intelligence' | 'dexterity' | 'vitality') => {
-      const c = statColors[stat];
-      const b = document.createElement('button');
-      b.textContent = `${name} +1`;
-      b.style.cssText = `padding:6px 12px;font:12px sans-serif;background:linear-gradient(180deg,${c.top},${c.bottom});color:${c.text};border:none;border-radius:6px;cursor:pointer;`;
-      b.addEventListener('click', () => allocateStat(stat));
-      return b;
-    };
-    row.appendChild(btn('Str', 'strength'));
-    row.appendChild(btn('Int', 'intelligence'));
-    row.appendChild(btn('Dex', 'dexterity'));
-    row.appendChild(btn('Vit', 'vitality'));
-    skillTreeStatAllocEl.appendChild(row);
-  }
-  skillTreePoints.textContent = `Skill points: ${getSkillPoints()}`;
-  skillTreeList.innerHTML = '';
-
-  const def = SKILL_TREE.find((s) => s.id === skillTreePage)!;
-  const baseUnlocked = isSkillUnlocked(def.id as SkillId);
-  const canUnlockBase = canUnlockSkill(def.id as SkillId, level);
-
-  // Base skill card for this page
-  const baseRow = document.createElement('div');
-  baseRow.style.cssText =
-    'display:flex;flex-direction:column;gap:4px;padding:10px;background:rgba(0,0,0,0.3);border-radius:8px;border:1px solid ' +
-    (baseUnlocked ? 'rgba(80,180,80,0.5)' : canUnlockBase ? 'rgba(200,180,80,0.5)' : 'rgba(255,255,255,0.1)') +
-    ';';
-  const nameEl = document.createElement('div');
-  nameEl.style.cssText = 'font:14px sans-serif;color:#e0e0e0;font-weight:bold;';
-  nameEl.textContent = def.name + (baseUnlocked ? ' ✓' : '');
-  const descEl = document.createElement('div');
-  descEl.style.cssText = 'font:11px sans-serif;color:rgba(255,255,255,0.75);';
-  descEl.textContent = def.description;
-  const reqEl = document.createElement('div');
-  reqEl.style.cssText = 'font:10px sans-serif;color:rgba(255,255,255,0.5);';
-  reqEl.textContent = `Level ${def.requiredLevel}` + (def.prerequisite ? ` (requires ${SKILL_TREE.find((s) => s.id === def.prerequisite)?.name})` : '');
-  baseRow.appendChild(nameEl);
-  baseRow.appendChild(descEl);
-  baseRow.appendChild(reqEl);
-  if (!baseUnlocked && canUnlockBase) {
-    const btn = document.createElement('button');
-    btn.textContent = 'Unlock (1 point)';
-    btn.style.cssText =
-      'align-self:flex-start;margin-top:4px;padding:6px 12px;font:12px sans-serif;background:linear-gradient(180deg,#60a060,#408040);color:#fff;border:none;border-radius:6px;cursor:pointer;';
-    btn.addEventListener('click', () => {
-      if (unlockSkill(def.id as SkillId, level)) renderSkillTree();
-    });
-    baseRow.appendChild(btn);
-  }
-  skillTreeList.appendChild(baseRow);
-
-  // Augments for this skill (only show when base is unlocked)
-  if (baseUnlocked) {
-    const augments = getAugmentsForSkill(skillTreePage);
-    for (const aug of augments) {
-      const unlocked = isAugmentUnlocked(aug.id);
-      const canUnlock = canUnlockAugment(aug.id, level);
-      const row = document.createElement('div');
-      row.style.cssText =
-        'display:flex;flex-direction:column;gap:4px;padding:10px;background:rgba(0,0,0,0.25);border-radius:8px;border:1px solid ' +
-        (unlocked ? 'rgba(80,180,80,0.4)' : canUnlock ? 'rgba(200,180,80,0.4)' : 'rgba(255,255,255,0.08)') +
-        ';margin-left:16px;';
-      const nameEl = document.createElement('div');
-      nameEl.style.cssText = 'font:13px sans-serif;color:#e0e0e0;font-weight:bold;';
-      nameEl.textContent = aug.name + (unlocked ? ' ✓' : '');
-      const descEl = document.createElement('div');
-      descEl.style.cssText = 'font:11px sans-serif;color:rgba(255,255,255,0.7);';
-      descEl.textContent = aug.description;
-      const reqEl = document.createElement('div');
-      reqEl.style.cssText = 'font:10px sans-serif;color:rgba(255,255,255,0.5);';
-      const prereqText = aug.prerequisite ? ` (requires ${augments.find((a) => a.id === aug.prerequisite)?.name})` : '';
-      reqEl.textContent = `Level ${aug.requiredLevel}${prereqText}`;
-      row.appendChild(nameEl);
-      row.appendChild(descEl);
-      row.appendChild(reqEl);
-      if (!unlocked && canUnlock) {
-        const btn = document.createElement('button');
-        btn.textContent = 'Unlock (1 point)';
-        btn.style.cssText =
-          'align-self:flex-start;margin-top:4px;padding:6px 12px;font:12px sans-serif;background:linear-gradient(180deg,#5080a0,#306080);color:#fff;border:none;border-radius:6px;cursor:pointer;';
-        btn.addEventListener('click', () => {
-          if (unlockAugment(aug.id, level)) renderSkillTree();
-        });
-        row.appendChild(btn);
-      }
-      skillTreeList.appendChild(row);
-    }
-  }
-}
-skillTreeEl.addEventListener('click', (e) => {
-  if (e.target === skillTreeEl) setSkillTreeOpen(false);
-});
 
 function makeOptionsSectionTitle(text: string): HTMLDivElement {
   const el = document.createElement('div');
@@ -749,7 +536,7 @@ function makeOptionsCheckbox(label: string, key: keyof GameOptionsState): HTMLEl
   return row;
 }
 
-// Game menu panel (I): icon tabs — Inventory, Equipment, Skills, Options
+// Game menu panel: I toggles (remembers tab); K opens Skills tab. Tabs — Inventory, Equipment, Skills, Options
 const gameMenuEl = document.createElement('div');
 gameMenuEl.id = 'game-menu-panel';
 gameMenuEl.style.cssText =
@@ -780,7 +567,7 @@ tabEquipmentBtn.innerHTML =
 
 const tabSkillsBtn = document.createElement('button');
 tabSkillsBtn.type = 'button';
-tabSkillsBtn.title = 'Skills';
+tabSkillsBtn.title = 'Skills (K)';
 tabSkillsBtn.style.cssText = tabBtnBase;
 tabSkillsBtn.innerHTML =
   '<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>';
@@ -816,10 +603,13 @@ equipmentTabPane.appendChild(equipmentSlotsEl);
 const skillsTabPane = document.createElement('div');
 skillsTabPane.style.cssText =
   'display:none;flex-direction:column;gap:12px;max-height:min(440px,58vh);overflow-y:auto;padding-right:4px;';
+const skillsStatAllocMount = document.createElement('div');
+skillsStatAllocMount.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
 const skillsIntro = document.createElement('div');
 skillsIntro.textContent =
   'Combat and gathering skills. Successful mining, forestry, and fishing attempts grant XP when you receive a resource.';
 skillsIntro.style.cssText = 'font:11px sans-serif;color:rgba(255,255,255,0.55);line-height:1.35;';
+skillsTabPane.appendChild(skillsStatAllocMount);
 skillsTabPane.appendChild(skillsIntro);
 const skillsListMount = document.createElement('div');
 skillsListMount.style.cssText = 'display:flex;flex-direction:column;gap:14px;';
@@ -888,7 +678,7 @@ optionsTabPane.appendChild(buildNote);
 inventoryTabPane.appendChild(inventoryGridEl);
 const inventoryHint = document.createElement('div');
 inventoryHint.textContent =
-  'Left-click sword or bow to equip; right-click for Examine, Equip (sword/bow), Use (other items), and Drop. Press I to close.';
+  'Left-click sword or bow to equip; right-click for Examine, Equip (sword/bow), Use (other items), and Drop. I toggles this menu; K opens the Skills tab.';
 inventoryHint.style.cssText = 'font:11px sans-serif;color:rgba(255,255,255,0.5);margin-top:4px;line-height:1.35;';
 inventoryTabPane.appendChild(inventoryHint);
 
@@ -932,6 +722,63 @@ tabInventoryBtn.addEventListener('click', () => setGameMenuTab('inventory'));
 tabEquipmentBtn.addEventListener('click', () => setGameMenuTab('equipment'));
 tabSkillsBtn.addEventListener('click', () => setGameMenuTab('skills'));
 tabOptionsBtn.addEventListener('click', () => setGameMenuTab('options'));
+
+function renderSkillsStatAlloc(): void {
+  skillsStatAllocMount.replaceChildren();
+  const title = document.createElement('div');
+  title.style.cssText = 'font:12px sans-serif;color:#e8e4ec;font-weight:bold;';
+  title.textContent = `Level ${level} · Combat stats`;
+  skillsStatAllocMount.appendChild(title);
+  if (statPointsToAllocate > 0) {
+    const label = document.createElement('div');
+    label.style.cssText = 'font:11px sans-serif;color:#c0a060;';
+    label.textContent = `Stat points to allocate: ${statPointsToAllocate}`;
+    skillsStatAllocMount.appendChild(label);
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;';
+    const statColors: Record<'strength' | 'intelligence' | 'dexterity' | 'vitality', { top: string; bottom: string; text: string }> = {
+      strength: { top: '#d4af37', bottom: '#b8860b', text: '#2a2200' },
+      intelligence: { top: '#7dd3fc', bottom: '#38bdf8', text: '#0c1929' },
+      dexterity: { top: '#4ade80', bottom: '#22c55e', text: '#052e16' },
+      vitality: { top: '#f87171', bottom: '#dc2626', text: '#450a0a' },
+    };
+    const mkBtn = (name: string, stat: 'strength' | 'intelligence' | 'dexterity' | 'vitality') => {
+      const c = statColors[stat];
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = `${name} +1`;
+      b.style.cssText = `padding:6px 12px;font:12px sans-serif;background:linear-gradient(180deg,${c.top},${c.bottom});color:${c.text};border:none;border-radius:6px;cursor:pointer;`;
+      b.addEventListener('click', () => allocateStat(stat));
+      return b;
+    };
+    row.appendChild(mkBtn('Str', 'strength'));
+    row.appendChild(mkBtn('Int', 'intelligence'));
+    row.appendChild(mkBtn('Dex', 'dexterity'));
+    row.appendChild(mkBtn('Vit', 'vitality'));
+    skillsStatAllocMount.appendChild(row);
+  } else {
+    const note = document.createElement('div');
+    note.style.cssText = 'font:11px sans-serif;color:rgba(255,255,255,0.48);line-height:1.35;';
+    note.textContent = 'No stat points to spend. You gain 3 per level up.';
+    skillsStatAllocMount.appendChild(note);
+  }
+}
+
+function allocateStat(stat: 'strength' | 'intelligence' | 'dexterity' | 'vitality'): void {
+  if (statPointsToAllocate <= 0) return;
+  statPointsToAllocate--;
+  if (stat === 'strength') strength++;
+  else if (stat === 'intelligence') intelligence++;
+  else if (stat === 'dexterity') dexterity++;
+  else {
+    const oldMax = getMaxHealth();
+    vitality++;
+    health = Math.min(health + (getMaxHealth() - oldMax), getMaxHealth());
+    setHealth(health);
+  }
+  updateStatsDisplay();
+  renderSkillsStatAlloc();
+}
 
 const INV_SLOT_SIZE = 40;
 const invSlotStyle = `width:${INV_SLOT_SIZE}px;height:${INV_SLOT_SIZE}px;background:rgba(0,0,0,0.5);border:2px solid rgba(255,255,255,0.2);border-radius:6px;display:flex;align-items:center;justify-content:center;font:10px sans-serif;color:rgba(255,255,255,0.9);cursor:pointer;transition:border-color 0.15s,background 0.15s;box-sizing:border-box;`;
@@ -1016,6 +863,7 @@ function renderSkillsPanel(): void {
 function refreshGameMenuLists(): void {
   renderEquipmentPanel();
   renderInventoryGrid();
+  renderSkillsStatAlloc();
   renderSkillsPanel();
 }
 
@@ -1034,7 +882,10 @@ function setGameMenuOpen(open: boolean): void {
 }
 
 levelUpNotifier.callback = () => {
-  if (getSkillPoints() > 0 || statPointsToAllocate > 0) setSkillTreeOpen(true);
+  if (statPointsToAllocate > 0) {
+    setGameMenuOpen(true);
+    setGameMenuTab('skills');
+  }
 };
 
 function setPaused(paused: boolean): void {
@@ -1075,7 +926,6 @@ function addXp(amount: number): void {
     dexterity++;
     vitality++;
     statPointsToAllocate += 3;
-    addSkillPoint();
     setHealth(getMaxHealth()); // heal to new max on level up
     updateStatsDisplay();
     levelUpNotifier.callback?.();
@@ -1125,7 +975,7 @@ function registerMiddleMouseCameraDrag(): void {
   container.addEventListener('mousedown', (e) => {
     if (e.button !== 1) return;
     if (isPaused || isDead) return;
-    if (skillTreeOpen || gameMenuOpen) return;
+    if (gameMenuOpen) return;
     const t = e.target as HTMLElement;
     if (t.closest('[data-web-iso="minimap"]')) return;
     if (t.closest('[data-web-iso="terrain-edit"]')) return;
@@ -1137,7 +987,7 @@ function registerMiddleMouseCameraDrag(): void {
   });
   window.addEventListener('mousemove', (e) => {
     if (!middleMouseCameraDrag) return;
-    if (isPaused || skillTreeOpen || gameMenuOpen) {
+    if (isPaused || gameMenuOpen) {
       middleMouseCameraDrag = false;
       return;
     }
@@ -1159,7 +1009,7 @@ clickOverlay.addEventListener(
   'wheel',
   (e) => {
     if (isPaused || isDead) return;
-    if (skillTreeOpen || gameMenuOpen) return;
+    if (gameMenuOpen) return;
     if ((e.target as HTMLElement).closest('[data-web-iso="terrain-edit"]')) return;
     e.preventDefault();
     const modeScale = e.deltaMode === 1 ? 24 : e.deltaMode === 2 ? 100 : 1;
@@ -1446,17 +1296,6 @@ scene.add(trainingDummyGroup);
 
 const gatheringNodesRoot = createGatheringNodesRoot();
 scene.add(gatheringNodesRoot);
-
-// Sword orbit radius/hit/cooldown (augment modifiers) — passed to combat/Sword
-function getSwordOrbitRadius(): number {
-  return isAugmentUnlocked('sword_whirl' as AugmentId) ? SWORD_ORBIT_RADIUS * 1.25 : SWORD_ORBIT_RADIUS;
-}
-function getSwordHitRadius(): number {
-  return isAugmentUnlocked('sword_whirl' as AugmentId) ? SWORD_HIT_RADIUS * 1.2 : SWORD_HIT_RADIUS;
-}
-function getSwordHitCooldown(): number {
-  return isAugmentUnlocked('sword_quickslash' as AugmentId) ? SWORD_HIT_COOLDOWN * 0.6 : SWORD_HIT_COOLDOWN;
-}
 
 const lastEnemyDamageTime: number[] = Array(ENEMY_COUNT).fill(-999);
 
@@ -3274,21 +3113,12 @@ function getTargetPosition(): THREE.Vector3 | null {
   return null;
 }
 
-// Projectile ballistics (parabolic arc, land at cursor)
-const LAUNCH_HEIGHT = 0.5;
-const MAX_PROJECTILE_RANGE = 28;
-
-// Fireballs: right-click shoots toward cursor (see combat/Projectiles)
-const FIREBALL_SPEED = 18;
-const FIREBALL_RADIUS = 0.35;
-const FIREBALL_TTL = 2;
 const enemyAlive = Array.from({ length: ENEMY_COUNT }, () => false);
 
-// Enemy health (grunts) and skill damage (base values; scaled by stats)
+// Enemy health (grunts) and damage (base values; scaled by stats)
 const MAX_ENEMY_HEALTH = 30;
 const enemyHealth = Array(ENEMY_COUNT).fill(MAX_ENEMY_HEALTH);
-const BASE_FIREBALL_DAMAGE = 25;
-const BASE_ROCK_DAMAGE = 18;
+const BASE_RANGED_DAMAGE = 18;
 const BASE_SWORD_DAMAGE = 12;
 
 function getMeleeDamage(): number {
@@ -3313,23 +3143,10 @@ function performMeleeAttack(gameTime: number, targetDirection?: THREE.Vector3, h
   }
   swordApi.performMeleeAttack(gameTime, targetDirection ?? null, state, origin);
 }
-function getMagicDamage(): number {
-  return Math.round(BASE_FIREBALL_DAMAGE * (intelligence / 10));
-}
 
-// Ranged weapons: cost ammo (except rock has infinite), damage scaled by dexterity
+/** Bow arrows: damage scaled by dexterity. */
 function getRangedDamage(): number {
-  let dmg = Math.round(BASE_ROCK_DAMAGE * (dexterity / 10));
-  if (isAugmentUnlocked('rock_heavy' as AugmentId)) dmg = Math.round(dmg * 1.25);
-  return dmg;
-}
-
-/** Ranged weapon type: thrown = rock (infinite ammo, slow rate); bow = targeted shot. */
-type RangedWeaponId = 'rock';
-const RANGED_ROCK_COOLDOWN = 1.2; // slow attack rate for thrown rock
-let lastRangedAttackTime = -999;
-function getRockCooldown(): number {
-  return isAugmentUnlocked('rock_quickdraw' as AugmentId) ? RANGED_ROCK_COOLDOWN * 0.7 : RANGED_ROCK_COOLDOWN;
+  return Math.round(BASE_RANGED_DAMAGE * (dexterity / 10));
 }
 
 // Bow: shoots at attack target when in range (equipped weapon)
@@ -3735,16 +3552,6 @@ const combatCallbacks = {
 const swordApi = createSword(scene, character, {
   getEquippedWeapon: () => equipment.getWeapon(),
   getMeleeDamage,
-  getOrbitRadius: getSwordOrbitRadius,
-  getHitRadius: getSwordHitRadius,
-  getHitCooldown: getSwordHitCooldown,
-  hasOrbitSword: () => isSkillUnlocked('sword'),
-  hasTwinBlades: () => isAugmentUnlocked('sword_twin' as AugmentId),
-  enemyCount: ENEMY_COUNT,
-  casterCount: CASTER_COUNT,
-  resurrectorCount: RESURRECTOR_COUNT,
-  penRatCount: PEN_RAT_COUNT,
-  wildlifeCount: useSpacetimeMp ? 0 : STARTING_WILDLIFE_COUNT,
 }, combatCallbacks);
 
 function rollTrainingDummyMeleeDamage(): number {
@@ -3769,19 +3576,6 @@ function performTrainingDummyMelee(gameTime: number, targetDir: THREE.Vector3): 
   damageTrainingDummy(rollTrainingDummyMeleeDamage());
 }
 
-const EXPLOSION_HIT_RADIUS_BASE = CONST_FIREBALL_RADIUS * CONST_EXPLOSION_MAX_SCALE;
-const EXPLOSION_HIT_RADIUS_INFERNO = EXPLOSION_HIT_RADIUS_BASE * 1.5;
-function getExplosionHitRadius(): number {
-  return isAugmentUnlocked('fireball_radius' as AugmentId) ? EXPLOSION_HIT_RADIUS_INFERNO : EXPLOSION_HIT_RADIUS_BASE;
-}
-
-const fireballsApi = createFireballs(scene, {
-  getMagicDamage,
-  hasExplosionAugment: () => isAugmentUnlocked('fireball_explosion' as AugmentId),
-  getExplosionHitRadius,
-}, combatCallbacks);
-
-const rocksApi = createRocks(scene, { getRangedDamage }, combatCallbacks);
 const arrowsApi = createArrows(scene, { getRangedDamage }, combatCallbacks);
 
 function isAnyEnemyAlive(): boolean {
@@ -3942,7 +3736,6 @@ function collectMinimapNpcYellow(): { x: number; z: number }[] {
   return out;
 }
 
-// Shift+right-click: fireball. Plain right-click: game context menu.
 clickOverlay.addEventListener('contextmenu', (e) => {
   e.preventDefault();
   if (
@@ -3961,45 +3754,8 @@ clickOverlay.addEventListener('contextmenu', (e) => {
       }
     }
   }
-  if (
-    e.shiftKey &&
-    !isDead &&
-    !isPaused &&
-    isSkillUnlocked('fireball') &&
-    mana >= FIREBALL_MANA_COST
-  ) {
-    setRayFromCanvasClient(e.clientX, e.clientY);
-    const hits = raycaster.intersectObject(terrainRoot, true);
-    if (hits.length > 0) {
-      setMana(mana - FIREBALL_MANA_COST);
-      const target = hits[0].point.clone();
-      target.y = 0;
-      fireballsApi.spawn(character.position, target);
-    }
-    return;
-  }
   openGameContextMenu(e.clientX, e.clientY);
 });
-
-// Throw skill: rock projectiles (Q key, toward cursor)
-function throwRock(gameTime: number): void {
-  if (!isSkillUnlocked('rock')) return;
-  if (gameTime - lastRangedAttackTime < getRockCooldown()) return;
-  lastRangedAttackTime = gameTime;
-  raycaster.setFromCamera(pointer, followCamera.three);
-  const hits = raycaster.intersectObject(terrainRoot, true);
-  if (hits.length === 0) return;
-  const target = hits[0].point.clone();
-  target.y = 0;
-  const origin = character.position.clone();
-  const triple = isAugmentUnlocked('rock_triple' as AugmentId);
-  const spread = triple ? 0.15 : 0;
-  rocksApi.throw(origin, target, 0);
-  if (triple) {
-    rocksApi.throw(origin, target, spread);
-    rocksApi.throw(origin, target, -spread);
-  }
-}
 
 document.addEventListener('keydown', (e) => {
   if (document.activeElement === chatInputEl) {
@@ -4030,16 +3786,17 @@ document.addEventListener('keydown', (e) => {
       return;
     }
     if (!isDead) setPaused(!isPaused);
-    if (skillTreeOpen) setSkillTreeOpen(false);
     if (gameMenuOpen) setGameMenuOpen(false);
     return;
   }
   if (e.key === 'k' || e.key === 'K') {
     e.preventDefault();
-    if (skillTreeOpen) {
-      setSkillTreeOpen(false);
-    } else if (!isDead && !isPaused) {
-      setSkillTreeOpen(true);
+    if (isDead || isPaused) return;
+    if (gameMenuOpen && gameMenuActiveTab === 'skills') {
+      setGameMenuOpen(false);
+    } else {
+      setGameMenuOpen(true);
+      setGameMenuTab('skills');
     }
     return;
   }
@@ -4065,8 +3822,6 @@ document.addEventListener('keydown', (e) => {
           lastBowAttackTime = gameTime;
         }
       }
-    } else if (isSkillUnlocked('rock')) {
-      throwRock(gameTime);
     }
   }
   if (e.key === ' ') {
@@ -5072,7 +4827,7 @@ const CAM_PITCH_SPEED = 1.05;
 const gameLoop = new GameLoop(
   (dt) => {
     followCamera.setTarget(character.position.x, character.position.y, character.position.z);
-    if (!isPaused && !skillTreeOpen && !gameMenuOpen && document.activeElement !== chatInputEl) {
+    if (!isPaused && !gameMenuOpen && document.activeElement !== chatInputEl) {
       if (cameraKeysHeld.has('a')) followCamera.addOrbitYaw(-CAM_ORBIT_SPEED * dt);
       if (cameraKeysHeld.has('d')) followCamera.addOrbitYaw(CAM_ORBIT_SPEED * dt);
       if (cameraKeysHeld.has('w')) followCamera.addPitch(CAM_PITCH_SPEED * dt);
@@ -5179,8 +4934,6 @@ const gameLoop = new GameLoop(
     }
     playerBurnVisuals.update(gameTime);
     playerPoisonVisuals.update(gameTime);
-    fireballsApi.update(dt, combatState);
-    rocksApi.update(dt, combatState);
     if (pendingBowShotTarget) {
       arrowsApi.shoot(character.position.clone(), pendingBowShotTarget);
       pendingBowShotTarget = null;

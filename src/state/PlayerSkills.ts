@@ -1,6 +1,6 @@
 /**
  * Player skill levels (RuneScape-style categories): combat + gathering stats for the Skills panel.
- * Separate from `SkillTree` (K key: unlock points / augments).
+ * Stat allocation (Str/Int/Dex/Vit) lives at the top of the Skills tab in the game menu (K).
  */
 
 export type PlayerSkillId =

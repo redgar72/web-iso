@@ -1,17 +1,10 @@
 /**
- * Sword combat: equipped mesh (swing animation), orbiting blades, and directional melee attack.
+ * Sword combat: equipped mesh (swing animation) and directional melee attack.
  * Hit detection calls provided damage callbacks; main wires those to enemy/caster/resurrector/boss damage.
  */
 
 import * as THREE from 'three';
-import {
-  SWORD_ORBIT_RADIUS,
-  SWORD_ANGULAR_SPEED,
-  SWORD_HIT_RADIUS,
-  SWORD_HIT_COOLDOWN,
-  SWORD_SWING_DURATION,
-  MELEE_RANGE,
-} from '../config/Constants';
+import { SWORD_SWING_DURATION, MELEE_RANGE } from '../config/Constants';
 import type { CombatDamageCallbacks, CombatState } from './types';
 import type { ItemId } from '../items/ItemTypes';
 
@@ -22,21 +15,10 @@ const MELEE_ARC = Math.PI / 3; // 60 degree arc in front
 export interface SwordConfig {
   getEquippedWeapon: () => ItemId | null;
   getMeleeDamage: () => number;
-  getOrbitRadius: () => number;
-  getHitRadius: () => number;
-  getHitCooldown: () => number;
-  /** Skill tree: orbit blades visible when true. */
-  hasOrbitSword: () => boolean;
-  hasTwinBlades: () => boolean;
-  enemyCount: number;
-  casterCount: number;
-  resurrectorCount: number;
-  penRatCount: number;
-  wildlifeCount: number;
 }
 
 export interface SwordAPI {
-  /** Call each frame: updates orbit, hit detection, equipped visibility, swing animation. */
+  /** Call each frame: updates equipped visibility and swing animation. */
   update: (dt: number, gameTime: number, state: CombatState) => void;
   /** Call when player triggers melee attack (Space or auto-attack). */
   startMeleeSwing: (gameTime: number) => void;
@@ -74,7 +56,7 @@ function createSwordMesh(): THREE.Group {
 }
 
 export function createSword(
-  scene: THREE.Scene,
+  _scene: THREE.Scene,
   character: THREE.Object3D,
   config: SwordConfig,
   callbacks: CombatDamageCallbacks
@@ -84,32 +66,7 @@ export function createSword(
   equippedSword.rotation.set(SWORD_IDLE_ROTATION.x, SWORD_IDLE_ROTATION.y, SWORD_IDLE_ROTATION.z);
   character.add(equippedSword);
 
-  const swordOrbit = new THREE.Group();
-  const swordMesh = createSwordMesh();
-  swordMesh.position.set(SWORD_ORBIT_RADIUS, 0.6, 0);
-  swordMesh.rotation.y = Math.PI / 2;
-  swordOrbit.add(swordMesh);
-  swordOrbit.visible = false;
-  scene.add(swordOrbit);
-
-  const swordOrbit2 = new THREE.Group();
-  const swordMesh2 = createSwordMesh();
-  swordMesh2.position.set(SWORD_ORBIT_RADIUS, 0.6, 0);
-  swordMesh2.rotation.y = Math.PI / 2;
-  swordOrbit2.add(swordMesh2);
-  swordOrbit2.visible = false;
-  scene.add(swordOrbit2);
-
-  const swordWorldPos = new THREE.Vector3();
-  const swordWorldPos2 = new THREE.Vector3();
   let swordSwingStartTime = -999;
-  const lastSwordHitByEnemy: number[] = Array(config.enemyCount).fill(-999);
-  const lastSwordHitByPenRat: number[] = Array(config.penRatCount).fill(-999);
-  const lastSwordHitByWildlife: number[] = Array(Math.max(1, config.wildlifeCount)).fill(-999);
-
-  function ensureWildlifeCooldownSlots(len: number): void {
-    while (lastSwordHitByWildlife.length < len) lastSwordHitByWildlife.push(-999);
-  }
 
   function updateEquippedSword(gameTime: number): void {
     equippedSword.visible = config.getEquippedWeapon() === 'sword';
@@ -155,85 +112,10 @@ export function createSword(
     }
   }
 
-  function checkOrbitHit(worldPos: THREE.Vector3, gameTime: number, state: CombatState): void {
-    const hitR = config.getHitRadius();
-    const hitCooldown = config.getHitCooldown();
-    const dmg = config.getMeleeDamage();
-    const hitDist = state.enemySize / 2 + hitR;
-
-    for (let j = 0; j < state.enemyPositions.length; j++) {
-      if (!state.enemyAlive[j]) continue;
-      if (gameTime - lastSwordHitByEnemy[j] < hitCooldown) continue;
-      if (worldPos.distanceTo(state.enemyPositions[j]) < hitDist) {
-        callbacks.damageEnemy(j, dmg);
-        lastSwordHitByEnemy[j] = gameTime;
-      }
-    }
-    for (let c = 0; c < state.casterPositions.length; c++) {
-      if (!state.casterAlive[c]) continue;
-      if (worldPos.distanceTo(state.casterPositions[c]) < state.casterSize / 2 + hitR) {
-        callbacks.damageCaster(c, dmg);
-      }
-    }
-    for (let r = 0; r < state.resurrectorPositions.length; r++) {
-      if (!state.resurrectorAlive[r]) continue;
-      if (worldPos.distanceTo(state.resurrectorPositions[r]) < state.resurrectorSize / 2 + hitR) {
-        callbacks.damageResurrector(r, dmg);
-      }
-    }
-    for (let t = 0; t < state.teleporterPositions.length; t++) {
-      if (!state.teleporterAlive[t]) continue;
-      if (worldPos.distanceTo(state.teleporterPositions[t]) < state.teleporterSize / 2 + hitR) {
-        callbacks.damageTeleporter(t, dmg);
-      }
-    }
-    if (state.bossAlive && worldPos.distanceTo(state.bossPosition) < state.bossHitboxRadius + hitR) {
-      callbacks.damageBoss(dmg);
-    }
-    const penHitDist = state.penRatSize / 2 + hitR;
-    for (let p = 0; p < state.penRatPositions.length; p++) {
-      if (!state.penRatAlive[p] || !state.penRatAttackable[p]) continue;
-      if (gameTime - lastSwordHitByPenRat[p] < hitCooldown) continue;
-      if (worldPos.distanceTo(state.penRatPositions[p]) < penHitDist) {
-        callbacks.damagePenRat(p, dmg);
-        lastSwordHitByPenRat[p] = gameTime;
-      }
-    }
-    ensureWildlifeCooldownSlots(state.wildlifePositions.length);
-    for (let w = 0; w < state.wildlifePositions.length; w++) {
-      if (!state.wildlifeAlive[w] || !state.wildlifeAttackable[w]) continue;
-      if (gameTime - lastSwordHitByWildlife[w] < hitCooldown) continue;
-      const wh = state.wildlifeHitRadius[w] + hitR;
-      if (worldPos.distanceTo(state.wildlifePositions[w]) < wh) {
-        callbacks.damageWildlife(w, dmg);
-        lastSwordHitByWildlife[w] = gameTime;
-      }
-    }
-  }
-
-  function update(dt: number, gameTime: number, state: CombatState): void {
-    const hasSword = config.getEquippedWeapon() === 'sword'; // orbit visibility follows skill in main; we use weapon for equipped
+  function update(_dt: number, gameTime: number, _state: CombatState): void {
+    void _dt;
+    void _state;
     updateEquippedSword(gameTime);
-
-    const hasOrbit = config.hasOrbitSword();
-    const orbitR = config.getOrbitRadius();
-    swordOrbit.visible = hasOrbit;
-    swordOrbit2.visible = hasOrbit && config.hasTwinBlades();
-
-    if (!hasOrbit) return;
-    swordMesh.position.x = orbitR;
-    swordOrbit.position.copy(character.position);
-    swordOrbit.rotation.y += SWORD_ANGULAR_SPEED * dt;
-    swordMesh.getWorldPosition(swordWorldPos);
-    checkOrbitHit(swordWorldPos, gameTime, state);
-
-    if (config.hasTwinBlades()) {
-      swordMesh2.position.x = orbitR;
-      swordOrbit2.position.copy(character.position);
-      swordOrbit2.rotation.y -= SWORD_ANGULAR_SPEED * dt;
-      swordMesh2.getWorldPosition(swordWorldPos2);
-      checkOrbitHit(swordWorldPos2, gameTime, state);
-    }
   }
 
   function startMeleeSwing(gameTime: number): void {
@@ -339,7 +221,6 @@ export function createSword(
       }
     }
 
-    ensureWildlifeCooldownSlots(state.wildlifePositions.length);
     for (let w = 0; w < state.wildlifePositions.length; w++) {
       if (!state.wildlifeAlive[w] || !state.wildlifeAttackable[w]) continue;
       const wildMeleeDist = state.wildlifeHitRadius[w] + MELEE_RANGE;
