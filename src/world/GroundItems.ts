@@ -10,6 +10,9 @@ import { worldXZToTile, tileCenterXZ, type GridTile } from './TilePathfinding';
 
 const GROUND_ITEM_USERDATA = 'groundItemId';
 
+/** Wall-clock lifetime before a dropped item is removed from the world. */
+const GROUND_ITEM_LIFETIME_MS = 60_000;
+
 /** Extra space between stacked ground-item labels (screen px). */
 const LABEL_STACK_GAP = 2;
 
@@ -66,6 +69,7 @@ interface GroundItemEntry {
   itemId: ItemId;
   mesh: THREE.Mesh;
   labelEl: HTMLDivElement;
+  spawnTimeMs: number;
 }
 
 function createItemMesh(itemId: ItemId): THREE.Mesh {
@@ -110,6 +114,14 @@ export function createGroundItems(options: GroundItemsOptions): GroundItemsAPI {
     if (i >= 0) entries.splice(i, 1);
   }
 
+  function purgeExpired(nowMs: number): void {
+    for (let i = entries.length - 1; i >= 0; i--) {
+      if (nowMs - entries[i].spawnTimeMs >= GROUND_ITEM_LIFETIME_MS) {
+        removeEntry(entries[i]);
+      }
+    }
+  }
+
   function pickupById(id: number): boolean {
     const entry = entries.find((e) => e.id === id);
     if (!entry) return false;
@@ -150,10 +162,11 @@ export function createGroundItems(options: GroundItemsOptions): GroundItemsAPI {
 
     labelLayer.appendChild(labelEl);
     group.add(mesh);
-    entries.push({ id, itemId, mesh, labelEl });
+    entries.push({ id, itemId, mesh, labelEl, spawnTimeMs: performance.now() });
   }
 
   function updateLabels(): void {
+    purgeExpired(performance.now());
     const camera = options.getCamera();
     const rect = options.canvas.getBoundingClientRect();
     const containerRect = options.container.getBoundingClientRect();

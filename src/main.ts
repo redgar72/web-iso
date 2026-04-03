@@ -1831,10 +1831,16 @@ function isTileMovementActive(): boolean {
 
 /**
  * Path from current tile to goal tile (OSRS BFS order), then move in segments of up to 2 tiles.
+ * Clicks on blocked cells (e.g. water) snap to the nearest occupiable tile before pathing.
  */
 function beginTilePathToWorldGoal(goalWx: number, goalWz: number): void {
   const start = getPlayerPathTile();
-  const goal = worldXZToTile(goalWx, goalWz);
+  const clicked = worldXZToTile(goalWx, goalWz);
+  const goal = findNearestOccupiableTile(clicked);
+  if (goal === null) {
+    clearTileMovement();
+    return;
+  }
   const path = findTilePath(start, goal);
 
   if (path === null) {
@@ -2194,8 +2200,10 @@ function walkToGroundPoint(p: THREE.Vector3): void {
   const z = Math.max(TERRAIN_XZ_MIN, Math.min(TERRAIN_XZ_MAX, p.z));
   if (tilePath !== null) {
     pendingWorldGoal = { x, z };
-    moveGoalTile = worldXZToTile(x, z);
-    const tc = tileCenterXZ(moveGoalTile);
+    const goalTile = findNearestOccupiableTile(worldXZToTile(x, z));
+    if (goalTile === null) return;
+    moveGoalTile = goalTile;
+    const tc = tileCenterXZ(goalTile);
     moveTargetTileMarker.position.set(tc.x, moveTargetTileMarker.position.y, tc.z);
     moveTargetTileMarker.visible = true;
     return;
@@ -2227,8 +2235,10 @@ function requestWalkOrPickupGroundItem(itemId: number): void {
   const z = Math.max(TERRAIN_XZ_MIN, Math.min(TERRAIN_XZ_MAX, goal.z));
   if (tilePath !== null) {
     pendingWorldGoal = { x, z };
-    moveGoalTile = worldXZToTile(x, z);
-    const tc = tileCenterXZ(moveGoalTile);
+    const goalTile = findNearestOccupiableTile(worldXZToTile(x, z));
+    if (goalTile === null) return;
+    moveGoalTile = goalTile;
+    const tc = tileCenterXZ(goalTile);
     moveTargetTileMarker.position.set(tc.x, moveTargetTileMarker.position.y, tc.z);
     moveTargetTileMarker.visible = true;
   } else {
