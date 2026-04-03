@@ -6,6 +6,7 @@ import { DbConnection, type EventContext, type ReducerEventContext } from './std
 import ChatMessageTbl from './stdb/chat_message_table';
 import HitSplatTbl from './stdb/hit_splat_table';
 import PlayerTbl from './stdb/player_table';
+import ServerNpcTbl from './stdb/server_npc_table';
 import TerrainChunkTbl from './stdb/terrain_chunk_table';
 import type { MultiplayerHandlers } from './MultiplayerClient';
 
@@ -13,6 +14,7 @@ type PlayerRow = Infer<typeof PlayerTbl>;
 type HitSplatRow = Infer<typeof HitSplatTbl>;
 type TerrainChunkRow = Infer<typeof TerrainChunkTbl>;
 type ChatMessageRow = Infer<typeof ChatMessageTbl>;
+type ServerNpcRowType = Infer<typeof ServerNpcTbl>;
 
 /** {@link DbConnectionImpl.isActive} — WebSocket is OPEN; safe to call reducers. */
 type DbConnectionWithActive = DbConnection & { isActive: boolean };
@@ -141,6 +143,7 @@ export class SpacetimeMultiplayerClient {
             this.emitWelcomeIfNeeded(conn);
             this.emitSnap(conn);
             this.syncAllTerrainChunks(conn);
+            this.handlers.onServerWildlifeDirty?.(conn);
             if (!this.spacetimeSnapshotNotified) {
               this.spacetimeSnapshotNotified = true;
               this.handlers.onSpacetimeSubscriptionApplied?.();
@@ -152,6 +155,8 @@ export class SpacetimeMultiplayerClient {
             'SELECT * FROM hit_splat',
             'SELECT * FROM terrain_chunk',
             'SELECT * FROM chat_message',
+            'SELECT * FROM npc_spawner',
+            'SELECT * FROM server_npc',
           ]);
       })
       .build();
@@ -196,6 +201,24 @@ export class SpacetimeMultiplayerClient {
         this.emitTerrainChunk(row);
       }
     );
+    const bumpWildlife = (): void => {
+      this.handlers.onServerWildlifeDirty?.(conn);
+    };
+    conn.db.npcSpawner.onInsert(bumpWildlife);
+    conn.db.npcSpawner.onUpdate(bumpWildlife);
+    conn.db.npcSpawner.onDelete(bumpWildlife);
+    conn.db.serverNpc.onInsert(bumpWildlife);
+    conn.db.serverNpc.onUpdate(bumpWildlife);
+    conn.db.serverNpc.onDelete((_ctx: EventContext, row: ServerNpcRowType) => {
+      this.handlers.onServerNpcDeleted?.({
+        entityId:
+          typeof row.id === 'bigint' ? row.id : BigInt(Math.floor(Number(row.id))),
+        templateKey: String(row.templateKey),
+        tx: asU32(row.tx),
+        tz: asU32(row.tz),
+      });
+      bumpWildlife();
+    });
   }
 
   private syncAllTerrainChunks(conn: DbConnection): void {
@@ -316,6 +339,55 @@ export class SpacetimeMultiplayerClient {
 
   sendChat(text: string): void {
     this.conn?.reducers.sendChat({ text });
+  }
+
+  npcSpawnerPlace(
+    tx: number,
+    tz: number,
+    templateKey: string,
+    respawnTicks: number,
+    wanderTiles: number,
+    hpOverride: number,
+    dmgOverride: number
+  ): void {
+    this.conn?.reducers.npcSpawnerPlace({
+      tx,
+      tz,
+      templateKey,
+      respawnTicks,
+      wanderTiles,
+      hpOverride,
+      dmgOverride,
+    });
+  }
+
+  npcSpawnerUpdate(
+    spawnerId: bigint,
+    templateKey: string,
+    respawnTicks: number,
+    wanderTiles: number,
+    hpOverride: number,
+    dmgOverride: number
+  ): void {
+    this.conn?.reducers.npcSpawnerUpdate({
+      spawnerId,
+      templateKey,
+      respawnTicks,
+      wanderTiles,
+      hpOverride,
+      dmgOverride,
+    });
+  }
+
+  npcSpawnerDelete(spawnerId: bigint): void {
+    this.conn?.reducers.npcSpawnerDelete({ spawnerId });
+  }
+
+  attackServerNpc(entityId: bigint, damage: number): void {
+    this.conn?.reducers.attackServerNpc({
+      entityId,
+      damage: Math.max(1, Math.min(100, Math.round(damage))),
+    });
   }
 
   /** Push latest `player` / `world_state` snapshot to handlers (e.g. when login overlay closes). */

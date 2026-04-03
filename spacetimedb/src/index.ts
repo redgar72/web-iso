@@ -3,7 +3,10 @@ import { schema, table, t, SenderError } from 'spacetimedb/server';
 import { affectedChunkKeys, applyTerrainStrokeToChunkMap } from './applyTerrainReducerEdit';
 import { TERRAIN_CHUNK_SEEDS } from './chunkSeeds';
 import { parseLevelChunkJson, serializeLevelChunk } from '../../shared/levelChunk';
+import { isServerNpcTemplateKey } from '../../shared/serverNpcTemplates';
 import { hashPassword, identitySpawnSeed } from './passwordHash';
+import { areOrthogonallyAdjacent, clampGlobalTile, isTileWalkableNpc } from './npcWorld';
+import { runServerNpcLifecycle } from './npcTick';
 
 /** Keep in sync with `shared/levelChunk` CHUNK_SIZE × `shared/world` WORLD_CHUNK_COUNT_* */
 const TERRAIN_GRID_WIDTH = 64 * 3;
@@ -116,6 +119,51 @@ const ChatMessage = table(
   }
 );
 
+/** Server-placed NPC spawner (1 live {@link ServerNpc} at a time). */
+const NpcSpawner = table(
+  {
+    name: 'npc_spawner',
+    public: true,
+    indexes: [{ name: 'by_tile', algorithm: 'btree', columns: ['tx', 'tz'] }],
+  },
+  {
+    id: t.u64().primaryKey().autoInc(),
+    tx: t.u32(),
+    tz: t.u32(),
+    templateKey: t.string(),
+    /** Whole-world ticks until respawn after death. */
+    respawnTicks: t.u32(),
+    /** Chebyshev wander radius in tiles from spawn. */
+    wanderTiles: t.u32(),
+    /** 0 = use template default HP. */
+    hpOverride: t.u32(),
+    /** 0 = use template default melee damage. */
+    dmgOverride: t.u32(),
+    /** Earliest {@link WorldState.tick} at which a new NPC may spawn. */
+    nextSpawnTick: t.u64(),
+  }
+);
+
+const ServerNpc = table(
+  {
+    name: 'server_npc',
+    public: true,
+    indexes: [{ name: 'by_spawner_id', algorithm: 'btree', columns: ['spawnerId'] }],
+  },
+  {
+    id: t.u64().primaryKey().autoInc(),
+    spawnerId: t.u64(),
+    templateKey: t.string(),
+    tx: t.u32(),
+    tz: t.u32(),
+    goalTx: t.u32(),
+    goalTz: t.u32(),
+    hp: t.u32(),
+    maxHp: t.u32(),
+    biteDamage: t.u32(),
+  }
+);
+
 export const spacetimedb = schema(
   WorldState,
   IdGen,
@@ -125,7 +173,9 @@ export const spacetimedb = schema(
   TerrainStroke,
   TerrainChunk,
   HitSplat,
-  ChatMessage
+  ChatMessage,
+  NpcSpawner,
+  ServerNpc
 );
 
 spacetimedb.init((ctx) => {
@@ -319,8 +369,11 @@ spacetimedb.reducer(
 spacetimedb.reducer('run_server_tick', { arg: TickJob.rowType }, (ctx, { arg }) => {
   void arg;
   const ws = ctx.db.worldState.id.find(0);
+  let tick = 0n;
   if (ws) {
-    ctx.db.worldState.id.update({ ...ws, tick: ws.tick + 1n });
+    tick = ws.tick + 1n;
+    ctx.db.worldState.id.update({ ...ws, tick });
+    runServerNpcLifecycle(ctx, tick);
   }
   ctx.db.tickJob.insert({
     scheduledId: 0n,
@@ -438,6 +491,128 @@ spacetimedb.reducer(
         chunkKey: k,
         json: serializeLevelChunk(ch, false),
       });
+    }
+  }
+);
+
+spacetimedb.reducer(
+  'npc_spawner_place',
+  {
+    tx: t.u32(),
+    tz: t.u32(),
+    templateKey: t.string(),
+    respawnTicks: t.u32(),
+    wanderTiles: t.u32(),
+    hpOverride: t.u32(),
+    dmgOverride: t.u32(),
+  },
+  (ctx, { tx, tz, templateKey, respawnTicks, wanderTiles, hpOverride, dmgOverride }) => {
+    const p = ctx.db.player.owner.find(ctx.sender);
+    if (!p) return;
+    const tpl = templateKey.trim().toLowerCase();
+    if (!isServerNpcTemplateKey(tpl)) {
+      throw new SenderError('Unknown NPC template.');
+    }
+    const c = clampGlobalTile(tx, tz);
+    if (!isTileWalkableNpc(ctx.db.terrainChunk, c.tx, c.tz)) {
+      throw new SenderError('Cannot place spawner on blocked tile.');
+    }
+    const rt = Math.max(1, Math.min(600, Math.floor(Number(respawnTicks) || 25)));
+    const wt = Math.max(0, Math.min(32, Math.floor(Number(wanderTiles) || 8)));
+    const hpO = Math.min(10_000, Math.max(0, Math.floor(Number(hpOverride) || 0)));
+    const dmgO = Math.min(500, Math.max(0, Math.floor(Number(dmgOverride) || 0)));
+    const ws = ctx.db.worldState.id.find(0);
+    const tNow = ws ? ws.tick : 0n;
+    ctx.db.npcSpawner.insert({
+      id: 0n,
+      tx: c.tx,
+      tz: c.tz,
+      templateKey: tpl,
+      respawnTicks: rt,
+      wanderTiles: wt,
+      hpOverride: hpO,
+      dmgOverride: dmgO,
+      nextSpawnTick: tNow,
+    });
+  }
+);
+
+spacetimedb.reducer(
+  'npc_spawner_update',
+  {
+    spawnerId: t.u64(),
+    templateKey: t.string(),
+    respawnTicks: t.u32(),
+    wanderTiles: t.u32(),
+    hpOverride: t.u32(),
+    dmgOverride: t.u32(),
+  },
+  (ctx, { spawnerId, templateKey, respawnTicks, wanderTiles, hpOverride, dmgOverride }) => {
+    const p = ctx.db.player.owner.find(ctx.sender);
+    if (!p) return;
+    const row = ctx.db.npcSpawner.id.find(spawnerId);
+    if (!row) throw new SenderError('Spawner not found.');
+    const tpl = templateKey.trim().toLowerCase();
+    if (!isServerNpcTemplateKey(tpl)) {
+      throw new SenderError('Unknown NPC template.');
+    }
+    const rt = Math.max(1, Math.min(600, Math.floor(Number(respawnTicks) || 25)));
+    const wt = Math.max(0, Math.min(32, Math.floor(Number(wanderTiles) || 8)));
+    const hpO = Math.min(10_000, Math.max(0, Math.floor(Number(hpOverride) || 0)));
+    const dmgO = Math.min(500, Math.max(0, Math.floor(Number(dmgOverride) || 0)));
+    ctx.db.npcSpawner.id.update({
+      ...row,
+      templateKey: tpl,
+      respawnTicks: rt,
+      wanderTiles: wt,
+      hpOverride: hpO,
+      dmgOverride: dmgO,
+    });
+  }
+);
+
+spacetimedb.reducer('npc_spawner_delete', { spawnerId: t.u64() }, (ctx, { spawnerId }) => {
+  const p = ctx.db.player.owner.find(ctx.sender);
+  if (!p) return;
+  const row = ctx.db.npcSpawner.id.find(spawnerId);
+  if (!row) return;
+  for (const npc of ctx.db.serverNpc.iter()) {
+    if (npc.spawnerId === spawnerId) {
+      ctx.db.serverNpc.id.delete(npc.id);
+      break;
+    }
+  }
+  ctx.db.npcSpawner.id.delete(spawnerId);
+});
+
+spacetimedb.reducer(
+  'attack_server_npc',
+  { entityId: t.u64(), damage: t.u32() },
+  (ctx, { entityId, damage }) => {
+    const p = ctx.db.player.owner.find(ctx.sender);
+    if (!p) return;
+    const npc = ctx.db.serverNpc.id.find(entityId);
+    if (!npc) return;
+    if (
+      !areOrthogonallyAdjacent(p.tx as number, p.tz as number, npc.tx as number, npc.tz as number)
+    ) {
+      throw new SenderError('Target is out of melee range.');
+    }
+    const dmg = Math.max(1, Math.min(100, Math.floor(Number(damage) || 1)));
+    const hp = (npc.hp as number) - dmg;
+    if (hp <= 0) {
+      const sp = ctx.db.npcSpawner.id.find(npc.spawnerId);
+      const ws = ctx.db.worldState.id.find(0);
+      const tick = ws ? ws.tick : 0n;
+      if (sp) {
+        ctx.db.npcSpawner.id.update({
+          ...sp,
+          nextSpawnTick: tick + BigInt(sp.respawnTicks as number),
+        });
+      }
+      ctx.db.serverNpc.id.delete(entityId);
+    } else {
+      ctx.db.serverNpc.id.update({ ...npc, hp });
     }
   }
 );

@@ -1,5 +1,6 @@
 import type { ClientMsg, NetPeer, ServerMsg } from '../../shared/protocol';
 import type { TerrainPaintMode } from '../../shared/terrainBrush';
+import type { DbConnection } from './stdb';
 
 const PING_INTERVAL_MS = 1000;
 
@@ -21,6 +22,15 @@ export interface MultiplayerHandlers {
   onSpacetimeConnectError?: (message: string) => void;
   /** SpacetimeDB: row inserted into `chat_message`. */
   onSpacetimeChat?: (fromPublicId: number, text: string) => void;
+  /** SpacetimeDB: `server_npc` or `npc_spawner` tables changed (for authoritative wildlife). */
+  onServerWildlifeDirty?: (conn: DbConnection) => void;
+  /** SpacetimeDB: replicated NPC removed (death / despawn) — for client VFX / loot. */
+  onServerNpcDeleted?: (args: {
+    entityId: bigint;
+    templateKey: string;
+    tx: number;
+    tz: number;
+  }) => void;
 }
 
 export class MultiplayerClient {

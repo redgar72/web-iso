@@ -10,6 +10,22 @@ import { worldXZToTile, tileCenterXZ, type GridTile } from './TilePathfinding';
 
 const GROUND_ITEM_USERDATA = 'groundItemId';
 
+/** Extra space between stacked ground-item labels (screen px). */
+const LABEL_STACK_GAP = 2;
+
+function rectsOverlap(
+  a: { left: number; right: number; top: number; bottom: number },
+  b: { left: number; right: number; top: number; bottom: number },
+  pad: number,
+): boolean {
+  return !(
+    a.right + pad <= b.left - pad ||
+    a.left - pad >= b.right + pad ||
+    a.bottom + pad <= b.top - pad ||
+    a.top - pad >= b.bottom + pad
+  );
+}
+
 export interface GroundItemsOptions {
   scene: THREE.Scene;
   getCamera: () => THREE.Camera;
@@ -146,6 +162,16 @@ export function createGroundItems(options: GroundItemsOptions): GroundItemsAPI {
       return;
     }
 
+    type Visible = {
+      entry: GroundItemEntry;
+      sx: number;
+      baseSy: number;
+      w: number;
+      h: number;
+    };
+
+    const visible: Visible[] = [];
+
     for (const e of entries) {
       e.mesh.getWorldPosition(tmpVec);
       tmpVec.y += 0.55;
@@ -155,11 +181,53 @@ export function createGroundItems(options: GroundItemsOptions): GroundItemsAPI {
         continue;
       }
       const sx = rect.left + (tmpVec.x * 0.5 + 0.5) * rect.width - containerRect.left;
-      const sy = rect.top + (-tmpVec.y * 0.5 + 0.5) * rect.height - containerRect.top;
+      const baseSy = rect.top + (-tmpVec.y * 0.5 + 0.5) * rect.height - containerRect.top;
       e.labelEl.style.display = 'block';
       e.labelEl.style.left = `${sx}px`;
-      e.labelEl.style.top = `${sy}px`;
+      e.labelEl.style.top = `${baseSy}px`;
       e.labelEl.style.transform = 'translate(-50%, -100%)';
+      const br = e.labelEl.getBoundingClientRect();
+      visible.push({
+        entry: e,
+        sx,
+        baseSy,
+        w: br.width,
+        h: br.height,
+      });
+    }
+
+    if (visible.length === 0) return;
+
+    // Lower on screen (larger baseSy) keeps anchor; others stack upward (smaller sy).
+    visible.sort((a, b) => b.baseSy - a.baseSy || a.entry.id - b.entry.id);
+
+    const pad = LABEL_STACK_GAP;
+    const placed: { left: number; right: number; top: number; bottom: number }[] = [];
+
+    for (const v of visible) {
+      let sy = v.baseSy;
+      const half = v.w * 0.5;
+      for (let guard = 0; ; guard++) {
+        const my = {
+          left: v.sx - half,
+          right: v.sx + half,
+          top: sy - v.h,
+          bottom: sy,
+        };
+        let hit = false;
+        for (const p of placed) {
+          if (rectsOverlap(my, p, pad)) {
+            hit = true;
+            break;
+          }
+        }
+        if (!hit || guard >= 4000) {
+          placed.push(my);
+          v.entry.labelEl.style.top = `${sy}px`;
+          break;
+        }
+        sy -= 1;
+      }
     }
   }
 

@@ -142,7 +142,6 @@ export const RESURRECT_COOLDOWN = 4;
 
 // --- Pickups ---
 export const PICKUP_RADIUS = 0.9;
-export const HEALTH_ORB_VALUE = 15;
 export const MANA_ORB_VALUE = 12;
 
 // --- Rocks (thrown projectile) ---

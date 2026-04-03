@@ -52,6 +52,14 @@ import SendChatReducer from "./send_chat_reducer";
 export { SendChatReducer };
 import TerrainEditReducer from "./terrain_edit_reducer";
 export { TerrainEditReducer };
+import NpcSpawnerPlaceReducer from "./npc_spawner_place_reducer";
+export { NpcSpawnerPlaceReducer };
+import NpcSpawnerUpdateReducer from "./npc_spawner_update_reducer";
+export { NpcSpawnerUpdateReducer };
+import NpcSpawnerDeleteReducer from "./npc_spawner_delete_reducer";
+export { NpcSpawnerDeleteReducer };
+import AttackServerNpcReducer from "./attack_server_npc_reducer";
+export { AttackServerNpcReducer };
 
 // Import and reexport all procedure arg types
 
@@ -62,8 +70,12 @@ import HitSplatRow from "./hit_splat_table";
 export { HitSplatRow };
 import IdGenRow from "./id_gen_table";
 export { IdGenRow };
+import NpcSpawnerRow from "./npc_spawner_table";
+export { NpcSpawnerRow };
 import PlayerRow from "./player_table";
 export { PlayerRow };
+import ServerNpcRow from "./server_npc_table";
+export { ServerNpcRow };
 import TerrainChunkRow from "./terrain_chunk_table";
 export { TerrainChunkRow };
 import TerrainStrokeRow from "./terrain_stroke_table";
@@ -76,6 +88,8 @@ import WorldStateRow from "./world_state_table";
 export { WorldStateRow };
 
 // Import and reexport all types
+import AttackServerNpc from "./attack_server_npc_type";
+export { AttackServerNpc };
 import ChatMessage from "./chat_message_type";
 export { ChatMessage };
 import EmitHitSplat from "./emit_hit_splat_type";
@@ -90,6 +104,14 @@ import LoginWithPassword from "./login_with_password_type";
 export { LoginWithPassword };
 import Move from "./move_type";
 export { Move };
+import NpcSpawner from "./npc_spawner_type";
+export { NpcSpawner };
+import NpcSpawnerDelete from "./npc_spawner_delete_type";
+export { NpcSpawnerDelete };
+import NpcSpawnerPlace from "./npc_spawner_place_type";
+export { NpcSpawnerPlace };
+import NpcSpawnerUpdate from "./npc_spawner_update_type";
+export { NpcSpawnerUpdate };
 import OnConnect from "./on_connect_type";
 export { OnConnect };
 import OnDisconnect from "./on_disconnect_type";
@@ -102,6 +124,8 @@ import RunServerTick from "./run_server_tick_type";
 export { RunServerTick };
 import SendChat from "./send_chat_type";
 export { SendChat };
+import ServerNpc from "./server_npc_type";
+export { ServerNpc };
 import TerrainChunk from "./terrain_chunk_type";
 export { TerrainChunk };
 import TerrainEdit from "./terrain_edit_type";
@@ -151,6 +175,21 @@ const tablesSchema = __schema(
     ],
   }, IdGenRow),
   __table({
+    name: 'npc_spawner',
+    indexes: [
+      { name: 'id', algorithm: 'btree', columns: [
+        'id',
+      ] },
+      { name: 'by_tile', algorithm: 'btree', columns: [
+        'tx',
+        'tz',
+      ] },
+    ],
+    constraints: [
+      { name: 'npc_spawner_id_key', constraint: 'unique', columns: ['id'] },
+    ],
+  }, NpcSpawnerRow),
+  __table({
     name: 'player',
     indexes: [
       { name: 'owner', algorithm: 'btree', columns: [
@@ -164,6 +203,20 @@ const tablesSchema = __schema(
       { name: 'player_owner_key', constraint: 'unique', columns: ['owner'] },
     ],
   }, PlayerRow),
+  __table({
+    name: 'server_npc',
+    indexes: [
+      { name: 'id', algorithm: 'btree', columns: [
+        'id',
+      ] },
+      { name: 'by_spawner_id', algorithm: 'btree', columns: [
+        'spawnerId',
+      ] },
+    ],
+    constraints: [
+      { name: 'server_npc_id_key', constraint: 'unique', columns: ['id'] },
+    ],
+  }, ServerNpcRow),
   __table({
     name: 'terrain_chunk',
     indexes: [
@@ -233,6 +286,10 @@ const reducersSchema = __reducers(
   __reducerSchema("emit_hit_splat", EmitHitSplatReducer),
   __reducerSchema("send_chat", SendChatReducer),
   __reducerSchema("terrain_edit", TerrainEditReducer),
+  __reducerSchema("npc_spawner_place", NpcSpawnerPlaceReducer),
+  __reducerSchema("npc_spawner_update", NpcSpawnerUpdateReducer),
+  __reducerSchema("npc_spawner_delete", NpcSpawnerDeleteReducer),
+  __reducerSchema("attack_server_npc", AttackServerNpcReducer),
 );
 
 /** The schema information for all procedures in this module. This is defined the same way as the procedures would have been defined in the server. */

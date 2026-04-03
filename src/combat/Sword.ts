@@ -105,7 +105,11 @@ export function createSword(
   let swordSwingStartTime = -999;
   const lastSwordHitByEnemy: number[] = Array(config.enemyCount).fill(-999);
   const lastSwordHitByPenRat: number[] = Array(config.penRatCount).fill(-999);
-  const lastSwordHitByWildlife: number[] = Array(config.wildlifeCount).fill(-999);
+  const lastSwordHitByWildlife: number[] = Array(Math.max(1, config.wildlifeCount)).fill(-999);
+
+  function ensureWildlifeCooldownSlots(len: number): void {
+    while (lastSwordHitByWildlife.length < len) lastSwordHitByWildlife.push(-999);
+  }
 
   function updateEquippedSword(gameTime: number): void {
     equippedSword.visible = config.getEquippedWeapon() === 'sword';
@@ -195,6 +199,7 @@ export function createSword(
         lastSwordHitByPenRat[p] = gameTime;
       }
     }
+    ensureWildlifeCooldownSlots(state.wildlifePositions.length);
     for (let w = 0; w < state.wildlifePositions.length; w++) {
       if (!state.wildlifeAlive[w] || !state.wildlifeAttackable[w]) continue;
       if (gameTime - lastSwordHitByWildlife[w] < hitCooldown) continue;
@@ -334,6 +339,7 @@ export function createSword(
       }
     }
 
+    ensureWildlifeCooldownSlots(state.wildlifePositions.length);
     for (let w = 0; w < state.wildlifePositions.length; w++) {
       if (!state.wildlifeAlive[w] || !state.wildlifeAttackable[w]) continue;
       const wildMeleeDist = state.wildlifeHitRadius[w] + MELEE_RANGE;
