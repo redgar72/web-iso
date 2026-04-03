@@ -239,6 +239,10 @@ export function areOrthogonallyAdjacent(a: GridTile, b: GridTile): boolean {
 /**
  * Among tiles that share an edge with `targetTile`, pick one reachable from `start` with the shortest path.
  * Ties keep the first candidate in ORTHOGONAL_OFFSETS order.
+ *
+ * Requires {@link canCrossOrthogonalEdge} from neighbor into `targetTile` — correct when you must step onto
+ * the target (e.g. open ground). Not for solid interactables (trees, rocks): use
+ * {@link findClosestReachableOrthAdjacentStandTile}.
  */
 export function findClosestReachableOrthAdjacentTile(start: GridTile, targetTile: GridTile): GridTile | null {
   const s = clampToGrid(start);
@@ -252,6 +256,34 @@ export function findClosestReachableOrthAdjacentTile(start: GridTile, targetTile
     const neighbor: GridTile = { x: nx, z: nz };
     if (!isTileOccupiable(neighbor)) continue;
     if (!canCrossOrthogonalEdge(neighbor, t)) continue;
+    const path = findTilePath(s, neighbor);
+    if (path === null) continue;
+    if (path.length < bestLen) {
+      bestLen = path.length;
+      best = neighbor;
+    }
+  }
+  return best;
+}
+
+/**
+ * Orthogonal neighbors of `solidTargetTile` that are occupiable and reachable from `start`, picking the
+ * shortest path. Does not require crossing into `solidTargetTile` (gathering nodes block all inward edges).
+ */
+export function findClosestReachableOrthAdjacentStandTile(
+  start: GridTile,
+  solidTargetTile: GridTile
+): GridTile | null {
+  const s = clampToGrid(start);
+  const t = clampToGrid(solidTargetTile);
+  let best: GridTile | null = null;
+  let bestLen = Infinity;
+  for (const [dx, dz] of ORTHOGONAL_OFFSETS) {
+    const nx = t.x + dx;
+    const nz = t.z + dz;
+    if (nx < 0 || nx >= TERRAIN_GRID_WIDTH || nz < 0 || nz >= TERRAIN_GRID_DEPTH) continue;
+    const neighbor: GridTile = { x: nx, z: nz };
+    if (!isTileOccupiable(neighbor)) continue;
     const path = findTilePath(s, neighbor);
     if (path === null) continue;
     if (path.length < bestLen) {

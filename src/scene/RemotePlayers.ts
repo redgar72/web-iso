@@ -68,6 +68,7 @@ export function createRemotePlayers(opts?: RemotePlayersOptions): {
 
   function releaseMesh(m: THREE.Mesh): void {
     m.visible = false;
+    delete m.userData.remotePeerId;
     freeMeshes.push(m);
   }
 
@@ -80,6 +81,7 @@ export function createRemotePlayers(opts?: RemotePlayersOptions): {
       const py = groundY(p.x, p.z) + REMOTE_BOX_HALF_H;
       if (!e) {
         const mesh = takeMesh();
+        mesh.userData.remotePeerId = p.id;
         mesh.position.set(p.x, py, p.z);
         e = {
           mesh,
@@ -94,6 +96,7 @@ export function createRemotePlayers(opts?: RemotePlayersOptions): {
         e.authTz = p.tz;
         e.goalTx = p.goalTx;
         e.goalTz = p.goalTz;
+        e.mesh.userData.remotePeerId = p.id;
         e.mesh.position.y = py;
       }
     }

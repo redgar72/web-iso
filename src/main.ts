@@ -11,9 +11,11 @@ import {
   nextTileTowardGoal,
   pickGreedyStepAway,
   areOrthogonallyAdjacent,
+  findClosestReachableOrthAdjacentStandTile,
   findClosestReachableOrthAdjacentTile,
   replaceTileNavExceptions,
   findNearestOccupiableTile,
+  isTileOccupiable,
   TERRAIN_GRID_DEPTH,
   TERRAIN_GRID_WIDTH,
   type GridTile,
@@ -111,6 +113,7 @@ import type { DbConnection } from './net/stdb';
 import {
   npcSpawnerIdFromIntersection,
   serverWildlifeEntityFromIntersection,
+  wildlifeKindFromTemplateKey,
 } from './scene/meshes/StartingWildlifeMeshes';
 import { SERVER_NPC_TEMPLATE_KEYS } from '../shared/serverNpcTemplates';
 
@@ -162,6 +165,11 @@ const canvas = renderer.domElement;
 const clickOverlay = document.createElement('div');
 clickOverlay.style.cssText = 'position:absolute;inset:0;z-index:1;';
 container.appendChild(clickOverlay);
+
+/** Top-left HUD line derived from ray hits under the cursor (see {@link computeHoverTooltipText}). */
+let hoverTooltipText = '';
+
+let remotePlayersApi: ReturnType<typeof createRemotePlayers> | null = null;
 
 /** Screen-space ripples for left-clicks on the scene (below HUD menus). */
 const clickRippleLayer = document.createElement('div');
@@ -222,16 +230,8 @@ const BASE_MAX_HEALTH = 100;
 const MAX_MANA = 100;
 let mana = MAX_MANA;
 
-// Character base stats (at 10 = 100% of base)
-let strength = 10;     // melee damage
-let intelligence = 10;  // magic damage
-let dexterity = 10;     // ranged damage
-let vitality = 10;      // max health
-/** Unspent stat points from level ups (3 per level to allocate to Str/Int/Dex/Vit). */
-let statPointsToAllocate = 0;
-
 function getMaxHealth(): number {
-  return Math.round(BASE_MAX_HEALTH * (vitality / 10));
+  return BASE_MAX_HEALTH;
 }
 
 // XP and leveling
@@ -490,9 +490,6 @@ function respawn(): void {
 
 respawnBtn.addEventListener('click', respawn);
 
-/** Called when player levels up (e.g. to open character sheet for stat points). */
-const levelUpNotifier: { callback: (() => void) | null } = { callback: null };
-
 // Pause state & overlay
 let isPaused = false;
 const pauseEl = document.createElement('div');
@@ -603,13 +600,10 @@ equipmentTabPane.appendChild(equipmentSlotsEl);
 const skillsTabPane = document.createElement('div');
 skillsTabPane.style.cssText =
   'display:none;flex-direction:column;gap:12px;max-height:min(440px,58vh);overflow-y:auto;padding-right:4px;';
-const skillsStatAllocMount = document.createElement('div');
-skillsStatAllocMount.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
 const skillsIntro = document.createElement('div');
 skillsIntro.textContent =
   'Combat and gathering skills. Successful mining, forestry, and fishing attempts grant XP when you receive a resource.';
 skillsIntro.style.cssText = 'font:11px sans-serif;color:rgba(255,255,255,0.55);line-height:1.35;';
-skillsTabPane.appendChild(skillsStatAllocMount);
 skillsTabPane.appendChild(skillsIntro);
 const skillsListMount = document.createElement('div');
 skillsListMount.style.cssText = 'display:flex;flex-direction:column;gap:14px;';
@@ -723,63 +717,6 @@ tabEquipmentBtn.addEventListener('click', () => setGameMenuTab('equipment'));
 tabSkillsBtn.addEventListener('click', () => setGameMenuTab('skills'));
 tabOptionsBtn.addEventListener('click', () => setGameMenuTab('options'));
 
-function renderSkillsStatAlloc(): void {
-  skillsStatAllocMount.replaceChildren();
-  const title = document.createElement('div');
-  title.style.cssText = 'font:12px sans-serif;color:#e8e4ec;font-weight:bold;';
-  title.textContent = `Level ${level} · Combat stats`;
-  skillsStatAllocMount.appendChild(title);
-  if (statPointsToAllocate > 0) {
-    const label = document.createElement('div');
-    label.style.cssText = 'font:11px sans-serif;color:#c0a060;';
-    label.textContent = `Stat points to allocate: ${statPointsToAllocate}`;
-    skillsStatAllocMount.appendChild(label);
-    const row = document.createElement('div');
-    row.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;';
-    const statColors: Record<'strength' | 'intelligence' | 'dexterity' | 'vitality', { top: string; bottom: string; text: string }> = {
-      strength: { top: '#d4af37', bottom: '#b8860b', text: '#2a2200' },
-      intelligence: { top: '#7dd3fc', bottom: '#38bdf8', text: '#0c1929' },
-      dexterity: { top: '#4ade80', bottom: '#22c55e', text: '#052e16' },
-      vitality: { top: '#f87171', bottom: '#dc2626', text: '#450a0a' },
-    };
-    const mkBtn = (name: string, stat: 'strength' | 'intelligence' | 'dexterity' | 'vitality') => {
-      const c = statColors[stat];
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.textContent = `${name} +1`;
-      b.style.cssText = `padding:6px 12px;font:12px sans-serif;background:linear-gradient(180deg,${c.top},${c.bottom});color:${c.text};border:none;border-radius:6px;cursor:pointer;`;
-      b.addEventListener('click', () => allocateStat(stat));
-      return b;
-    };
-    row.appendChild(mkBtn('Str', 'strength'));
-    row.appendChild(mkBtn('Int', 'intelligence'));
-    row.appendChild(mkBtn('Dex', 'dexterity'));
-    row.appendChild(mkBtn('Vit', 'vitality'));
-    skillsStatAllocMount.appendChild(row);
-  } else {
-    const note = document.createElement('div');
-    note.style.cssText = 'font:11px sans-serif;color:rgba(255,255,255,0.48);line-height:1.35;';
-    note.textContent = 'No stat points to spend. You gain 3 per level up.';
-    skillsStatAllocMount.appendChild(note);
-  }
-}
-
-function allocateStat(stat: 'strength' | 'intelligence' | 'dexterity' | 'vitality'): void {
-  if (statPointsToAllocate <= 0) return;
-  statPointsToAllocate--;
-  if (stat === 'strength') strength++;
-  else if (stat === 'intelligence') intelligence++;
-  else if (stat === 'dexterity') dexterity++;
-  else {
-    const oldMax = getMaxHealth();
-    vitality++;
-    health = Math.min(health + (getMaxHealth() - oldMax), getMaxHealth());
-    setHealth(health);
-  }
-  updateStatsDisplay();
-  renderSkillsStatAlloc();
-}
-
 const INV_SLOT_SIZE = 40;
 const invSlotStyle = `width:${INV_SLOT_SIZE}px;height:${INV_SLOT_SIZE}px;background:rgba(0,0,0,0.5);border:2px solid rgba(255,255,255,0.2);border-radius:6px;display:flex;align-items:center;justify-content:center;font:10px sans-serif;color:rgba(255,255,255,0.9);cursor:pointer;transition:border-color 0.15s,background 0.15s;box-sizing:border-box;`;
 
@@ -863,7 +800,6 @@ function renderSkillsPanel(): void {
 function refreshGameMenuLists(): void {
   renderEquipmentPanel();
   renderInventoryGrid();
-  renderSkillsStatAlloc();
   renderSkillsPanel();
 }
 
@@ -880,13 +816,6 @@ function setGameMenuOpen(open: boolean): void {
   gameMenuEl.style.display = open ? 'flex' : 'none';
   if (open) refreshGameMenuLists();
 }
-
-levelUpNotifier.callback = () => {
-  if (statPointsToAllocate > 0) {
-    setGameMenuOpen(true);
-    setGameMenuTab('skills');
-  }
-};
 
 function setPaused(paused: boolean): void {
   if (isDead) return;
@@ -921,14 +850,8 @@ function addXp(amount: number): void {
     const needed = getXpForNextLevel();
     xp -= needed;
     level++;
-    strength++;
-    intelligence++;
-    dexterity++;
-    vitality++;
-    statPointsToAllocate += 3;
-    setHealth(getMaxHealth()); // heal to new max on level up
+    setHealth(getMaxHealth()); // heal to full on level up
     updateStatsDisplay();
-    levelUpNotifier.callback?.();
   }
   updateXpDisplay();
 }
@@ -1763,6 +1686,9 @@ function mergePickIntersections(ray: THREE.Raycaster): THREE.Intersection[] {
   if (useSpacetimeMp) {
     objs.push(serverWildlifeRuntime.liveRoot, serverWildlifeRuntime.spawnerGhostRoot);
   }
+  if (remotePlayersApi !== null) {
+    objs.push(remotePlayersApi.group);
+  }
   return ray.intersectObjects(objs, true);
 }
 
@@ -1827,7 +1753,7 @@ function pathToClosestOrthTileTowardGatheringNode(nodeIndex: number): void {
   pendingGroundPickupId = null;
   const def = GATHERING_NODE_DEFINITIONS[nodeIndex];
   if (!def) return;
-  const adj = findClosestReachableOrthAdjacentTile(getPlayerPathTile(), def.tile);
+  const adj = findClosestReachableOrthAdjacentStandTile(getPlayerPathTile(), def.tile);
   if (adj === null) {
     addChatMessage("You can't reach that from here.");
     return;
@@ -2100,7 +2026,283 @@ type ContextMenuTarget =
   | { kind: 'gate' }
   | { kind: 'ground_item'; id: number; itemId: ItemId }
   | { kind: 'gathering'; nodeIndex: number }
-  | { kind: 'attackable'; target: AttackTarget };
+  | { kind: 'attackable'; target: AttackTarget }
+  | { kind: 'remote_player'; peerId: number };
+
+function remotePeerIdFromIntersection(hit: THREE.Intersection): number | null {
+  let o: THREE.Object3D | null = hit.object;
+  while (o) {
+    const id = o.userData?.remotePeerId;
+    if (typeof id === 'number') return id;
+    o = o.parent;
+  }
+  return null;
+}
+
+function attackTargetDedupeKey(t: AttackTarget): string {
+  if (t.type === 'server_wildlife' && t.serverEntityId !== undefined) {
+    return `sw:${t.index}:${t.serverEntityId}`;
+  }
+  return `${t.type}:${t.index}`;
+}
+
+function contextMenuTargetDedupeKey(t: ContextMenuTarget): string {
+  switch (t.kind) {
+    case 'tile': {
+      const g = worldXZToTile(t.groundPoint.x, t.groundPoint.z);
+      return `tile:${g.x},${g.z}`;
+    }
+    case 'ground_item':
+      return `gi:${t.id}`;
+    case 'gathering':
+      return `gath:${t.nodeIndex}`;
+    case 'gate':
+      return 'gate';
+    case 'attackable':
+      return `atk:${attackTargetDedupeKey(t.target)}`;
+    case 'remote_player':
+      return `rp:${t.peerId}`;
+  }
+}
+
+function canAttackInContextMenu(target: AttackTarget): boolean {
+  return (
+    (target.type !== 'pen_rat' &&
+      target.type !== 'starting_wildlife' &&
+      target.type !== 'server_wildlife') ||
+    (target.type === 'pen_rat' && penRatNpcs[target.index].attackable) ||
+    (target.type === 'starting_wildlife' &&
+      wildlifeNpcs[target.index] &&
+      wildlifeNpcs[target.index].attackable) ||
+    (target.type === 'server_wildlife' &&
+      serverWildlifeRuntime.getCombatRows(gameTime).some(
+        (r, i) =>
+          i === target.index && r.entityId === target.serverEntityId && r.attackable
+      ))
+  );
+}
+
+/** Same sentence style as context menu labels: normalize to lowercase, then capitalize first character. */
+function capitalizeHoverLine(line: string): string {
+  if (line.length === 0) return line;
+  return line.charAt(0).toUpperCase() + line.slice(1);
+}
+
+function hoverActionEntityLine(verb: string, entity: string): string {
+  const raw = `${verb} ${entity}`.trim().toLowerCase();
+  return capitalizeHoverLine(raw);
+}
+
+function gatheringHoverLabel(nodeIndex: number): string {
+  const def = GATHERING_NODE_DEFINITIONS[nodeIndex];
+  if (!def) return hoverActionEntityLine('harvest', 'resource');
+  if (def.kind === 'forestry') return hoverActionEntityLine('harvest', 'tree');
+  if (def.kind === 'mining') return hoverActionEntityLine('harvest', 'ore');
+  return hoverActionEntityLine('harvest', 'fish');
+}
+
+function attackableHoverEntityName(target: AttackTarget): string {
+  switch (target.type) {
+    case 'training_dummy':
+      return 'training dummy';
+    case 'enemy':
+      return 'grunt';
+    case 'caster':
+      return 'caster';
+    case 'resurrector':
+      return 'resurrector';
+    case 'teleporter':
+      return 'teleporter';
+    case 'boss':
+      return 'boss';
+    case 'pen_rat':
+      return 'rat';
+    case 'starting_wildlife':
+      return wildlifeKindAt(target.index) === 'bear' ? 'bear' : 'spider';
+    case 'server_wildlife': {
+      const rows = serverWildlifeRuntime.getCombatRows(gameTime);
+      const row = rows[target.index];
+      const kind = wildlifeKindFromTemplateKey(String(row?.templateKey ?? 'spider'));
+      if (kind === 'bear') return 'bear';
+      if (kind === 'rat') return 'rat';
+      return 'spider';
+    }
+  }
+}
+
+function primaryLabelForContextTarget(t: ContextMenuTarget): string {
+  switch (t.kind) {
+    case 'tile':
+      return isTileOccupiable(worldXZToTile(t.groundPoint.x, t.groundPoint.z))
+        ? hoverActionEntityLine('walk', 'here')
+        : capitalizeHoverLine("can't walk here");
+    case 'ground_item': {
+      const def = getItemDef(t.itemId);
+      return hoverActionEntityLine('pick up', def.name);
+    }
+    case 'gathering':
+      return gatheringHoverLabel(t.nodeIndex);
+    case 'gate':
+      return pathfindingDemoGateOpen
+        ? hoverActionEntityLine('close', 'gate')
+        : hoverActionEntityLine('open', 'gate');
+    case 'remote_player':
+      return hoverActionEntityLine('examine', 'player');
+    case 'attackable': {
+      const entity = attackableHoverEntityName(t.target);
+      return canAttackInContextMenu(t.target)
+        ? hoverActionEntityLine('attack', entity)
+        : hoverActionEntityLine('examine', entity);
+    }
+  }
+}
+
+/** One pick along the ray → at most one context target (no bare terrain). */
+function classifyIntersectionForContextMenu(hit: THREE.Intersection): ContextMenuTarget | null {
+  const itemHit = groundItemsApi.resolveGroundItemFromIntersection(hit);
+  if (itemHit) return { kind: 'ground_item', id: itemHit.id, itemId: itemHit.itemId };
+
+  const rp = remotePeerIdFromIntersection(hit);
+  if (rp !== null) return { kind: 'remote_player', peerId: rp };
+
+  const ratCtxIdx = penRatIndexFromIntersection(hit);
+  if (ratCtxIdx !== null && penRatNpcs[ratCtxIdx].alive) {
+    return { kind: 'attackable', target: { type: 'pen_rat', index: ratCtxIdx } };
+  }
+
+  const wildlifeCtxIdx = startingWildlifeIndexFromIntersection(hit);
+  if (
+    wildlifeCtxIdx !== null &&
+    wildlifeNpcs[wildlifeCtxIdx] &&
+    wildlifeNpcs[wildlifeCtxIdx].alive
+  ) {
+    return { kind: 'attackable', target: { type: 'starting_wildlife', index: wildlifeCtxIdx } };
+  }
+
+  if (useSpacetimeMp && spacetimeSessionReady) {
+    const se = serverWildlifeEntityFromIntersection(hit);
+    if (se !== null) {
+      const rows = serverWildlifeRuntime.getCombatRows(gameTime);
+      const ix = rows.findIndex((r) => r.entityId === se);
+      if (ix >= 0) {
+        return { kind: 'attackable', target: { type: 'server_wildlife', index: ix, serverEntityId: se } };
+      }
+    }
+  }
+
+  if (isObjectUnderAncestor(hit.object, pathfindingDemoPenRoot)) return { kind: 'gate' };
+
+  const gCtxIdx = gatheringNodeIndexFromIntersection(hit);
+  if (gCtxIdx !== null) return { kind: 'gathering', nodeIndex: gCtxIdx };
+
+  return null;
+}
+
+function pushGroundProximityContextTargets(
+  groundPoint: THREE.Vector3,
+  push: (t: ContextMenuTarget) => void
+): void {
+  const clickRadius = 1.5;
+
+  if (trainingDummyAlive) {
+    const dx = groundPoint.x - trainingDummyWorldPos.x;
+    const dz = groundPoint.z - trainingDummyWorldPos.z;
+    if (Math.sqrt(dx * dx + dz * dz) <= clickRadius + TRAINING_DUMMY_SIZE * 0.35) {
+      push({ kind: 'attackable', target: { type: 'training_dummy', index: 0 } });
+    }
+  }
+
+  for (let ri = 0; ri < PEN_RAT_COUNT; ri++) {
+    if (!penRatNpcs[ri].alive) continue;
+    if (groundPoint.distanceTo(penRatNpcs[ri].position) <= clickRadius + PEN_RAT_COLLISION_RADIUS) {
+      push({ kind: 'attackable', target: { type: 'pen_rat', index: ri } });
+    }
+  }
+
+  for (let wi = 0; wi < wildlifeNpcs.length; wi++) {
+    if (!wildlifeNpcs[wi].alive) continue;
+    if (groundPoint.distanceTo(wildlifeNpcs[wi].position) <= clickRadius + wildlifeNpcs[wi].collisionRadius) {
+      push({ kind: 'attackable', target: { type: 'starting_wildlife', index: wi } });
+    }
+  }
+
+  if (useSpacetimeMp && spacetimeSessionReady) {
+    const ctxRows = serverWildlifeRuntime.getCombatRows(gameTime);
+    for (let ci = 0; ci < ctxRows.length; ci++) {
+      const cr = ctxRows[ci]!;
+      if (groundPoint.distanceTo(cr.position) <= clickRadius + cr.hitRadius) {
+        push({
+          kind: 'attackable',
+          target: { type: 'server_wildlife', index: ci, serverEntityId: cr.entityId },
+        });
+      }
+    }
+  }
+
+  for (let j = 0; j < ENEMY_COUNT; j++) {
+    if (!enemyAlive[j]) continue;
+    if (groundPoint.distanceTo(enemyPositions[j]) <= clickRadius) {
+      push({ kind: 'attackable', target: { type: 'enemy', index: j } });
+    }
+  }
+  for (let c = 0; c < CASTER_COUNT; c++) {
+    if (!casterAlive[c]) continue;
+    if (groundPoint.distanceTo(casterLogicalPos[c]) <= clickRadius) {
+      push({ kind: 'attackable', target: { type: 'caster', index: c } });
+    }
+  }
+  for (let r = 0; r < RESURRECTOR_COUNT; r++) {
+    if (!resurrectorAlive[r]) continue;
+    if (groundPoint.distanceTo(resurrectorLogicalPos[r]) <= clickRadius) {
+      push({ kind: 'attackable', target: { type: 'resurrector', index: r } });
+    }
+  }
+  for (let t = 0; t < teleportersApi.getCount(); t++) {
+    if (!teleportersApi.isAlive(t)) continue;
+    if (groundPoint.distanceTo(teleportersApi.getPosition(t)) <= clickRadius) {
+      push({ kind: 'attackable', target: { type: 'teleporter', index: t } });
+    }
+  }
+  if (bossApi.isAlive() && groundPoint.distanceTo(bossApi.getPosition()) <= bossApi.getHitboxRadius()) {
+    push({ kind: 'attackable', target: { type: 'boss', index: 0 } });
+  }
+}
+
+function collectHoverContextTargets(clientX: number, clientY: number): ContextMenuTarget[] {
+  if (isDead || isPaused) return [];
+  setRayFromCanvasClient(clientX, clientY);
+  const picks = mergePickIntersections(raycaster);
+  if (picks.length === 0) return [];
+
+  const seen = new Set<string>();
+  const out: ContextMenuTarget[] = [];
+
+  const push = (t: ContextMenuTarget): void => {
+    const k = contextMenuTargetDedupeKey(t);
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push(t);
+  };
+
+  for (const hit of picks) {
+    const t = classifyIntersectionForContextMenu(hit);
+    if (t) push(t);
+  }
+
+  pushGroundProximityContextTargets(picks[0]!.point, push);
+  push({ kind: 'tile', groundPoint: picks[0]!.point });
+  return out;
+}
+
+function computeHoverTooltipText(clientX: number, clientY: number): string {
+  if (terrainEditPanel.isOpen() || isDead || isPaused) return '';
+  const targets = collectHoverContextTargets(clientX, clientY);
+  if (targets.length === 0) return '';
+  const primaryLabel = primaryLabelForContextTarget(targets[0]!);
+  if (targets.length === 1) return primaryLabel;
+  const more = targets.length - 1;
+  return `${primaryLabel} / ${more} more option${more === 1 ? '' : 's'}`;
+}
 
 function setRayFromCanvasClient(clientX: number, clientY: number): void {
   const rect = canvas.getBoundingClientRect();
@@ -2183,106 +2385,18 @@ function resolveContextMenuTarget(clientX: number, clientY: number): ContextMenu
 
   const picks = mergePickIntersections(raycaster);
   if (picks.length === 0) return null;
-  const top = picks[0];
 
-  const itemHit = groundItemsApi.resolveGroundItemFromIntersection(top);
-  if (itemHit) return { kind: 'ground_item', id: itemHit.id, itemId: itemHit.itemId };
-
-  const ratCtxIdx = penRatIndexFromIntersection(top);
-  if (ratCtxIdx !== null && penRatNpcs[ratCtxIdx].alive) {
-    return { kind: 'attackable', target: { type: 'pen_rat', index: ratCtxIdx } };
+  for (const hit of picks) {
+    const t = classifyIntersectionForContextMenu(hit);
+    if (t) return t;
   }
 
-  const wildlifeCtxIdx = startingWildlifeIndexFromIntersection(top);
-  if (
-    wildlifeCtxIdx !== null &&
-    wildlifeNpcs[wildlifeCtxIdx] &&
-    wildlifeNpcs[wildlifeCtxIdx].alive
-  ) {
-    return { kind: 'attackable', target: { type: 'starting_wildlife', index: wildlifeCtxIdx } };
-  }
-
-  if (useSpacetimeMp && spacetimeSessionReady) {
-    const se = serverWildlifeEntityFromIntersection(top);
-    if (se !== null) {
-      const rows = serverWildlifeRuntime.getCombatRows(gameTime);
-      const ix = rows.findIndex((r) => r.entityId === se);
-      if (ix >= 0) {
-        return { kind: 'attackable', target: { type: 'server_wildlife', index: ix, serverEntityId: se } };
-      }
-    }
-  }
-
-  if (isObjectUnderAncestor(top.object, pathfindingDemoPenRoot)) return { kind: 'gate'};
-
-  const gCtxIdx = gatheringNodeIndexFromIntersection(top);
-  if (gCtxIdx !== null) return { kind: 'gathering', nodeIndex: gCtxIdx };
-
-  const groundPoint = top.point;
-  const clickRadius = 1.5;
-
-  if (trainingDummyAlive) {
-    const dx = groundPoint.x - trainingDummyWorldPos.x;
-    const dz = groundPoint.z - trainingDummyWorldPos.z;
-    if (Math.sqrt(dx * dx + dz * dz) <= clickRadius + TRAINING_DUMMY_SIZE * 0.35) {
-      return { kind: 'attackable', target: { type: 'training_dummy', index: 0 } };
-    }
-  }
-
-  for (let ri = 0; ri < PEN_RAT_COUNT; ri++) {
-    if (!penRatNpcs[ri].alive) continue;
-    if (groundPoint.distanceTo(penRatNpcs[ri].position) <= clickRadius + PEN_RAT_COLLISION_RADIUS) {
-      return { kind: 'attackable', target: { type: 'pen_rat', index: ri } };
-    }
-  }
-
-  for (let wi = 0; wi < wildlifeNpcs.length; wi++) {
-    if (!wildlifeNpcs[wi].alive) continue;
-    if (groundPoint.distanceTo(wildlifeNpcs[wi].position) <= clickRadius + wildlifeNpcs[wi].collisionRadius) {
-      return { kind: 'attackable', target: { type: 'starting_wildlife', index: wi } };
-    }
-  }
-
-  if (useSpacetimeMp && spacetimeSessionReady) {
-    const ctxRows = serverWildlifeRuntime.getCombatRows(gameTime);
-    for (let ci = 0; ci < ctxRows.length; ci++) {
-      const cr = ctxRows[ci]!;
-      if (groundPoint.distanceTo(cr.position) <= clickRadius + cr.hitRadius) {
-        return {
-          kind: 'attackable',
-          target: { type: 'server_wildlife', index: ci, serverEntityId: cr.entityId },
-        };
-      }
-    }
-  }
-
-  for (let j = 0; j < ENEMY_COUNT; j++) {
-    if (!enemyAlive[j]) continue;
-    if (groundPoint.distanceTo(enemyPositions[j]) <= clickRadius) {
-      return { kind: 'attackable', target: { type: 'enemy', index: j } };
-    }
-  }
-  for (let c = 0; c < CASTER_COUNT; c++) {
-    if (!casterAlive[c]) continue;
-    if (groundPoint.distanceTo(casterLogicalPos[c]) <= clickRadius) {
-      return { kind: 'attackable', target: { type: 'caster', index: c } };
-    }
-  }
-  for (let r = 0; r < RESURRECTOR_COUNT; r++) {
-    if (!resurrectorAlive[r]) continue;
-    if (groundPoint.distanceTo(resurrectorLogicalPos[r]) <= clickRadius) {
-      return { kind: 'attackable', target: { type: 'resurrector', index: r } };
-    }
-  }
-  for (let t = 0; t < teleportersApi.getCount(); t++) {
-    if (!teleportersApi.isAlive(t)) continue;
-    if (groundPoint.distanceTo(teleportersApi.getPosition(t)) <= clickRadius) {
-      return { kind: 'attackable', target: { type: 'teleporter', index: t } };
-    }
-  }
-  if (bossApi.isAlive() && groundPoint.distanceTo(bossApi.getPosition()) <= bossApi.getHitboxRadius()) {
-    return { kind: 'attackable', target: { type: 'boss', index: 0 } };
-  }
+  const groundPoint = picks[0]!.point;
+  let found: ContextMenuTarget | null = null;
+  pushGroundProximityContextTargets(groundPoint, (t) => {
+    if (found === null) found = t;
+  });
+  if (found !== null) return found;
 
   return { kind: 'tile', groundPoint };
 }
@@ -2625,25 +2739,13 @@ function openGameContextMenu(clientX: number, clientY: number): void {
       label: 'Pick-up',
       action: () => requestWalkOrPickupGroundItem(target.id),
     });
+  } else if (target.kind === 'remote_player') {
+    entries.push({
+      label: 'Examine',
+      action: () => addChatMessage('Another adventurer.'),
+    });
   } else if (target.kind === 'attackable') {
-    const canAttackTarget =
-      (target.target.type !== 'pen_rat' &&
-        target.target.type !== 'starting_wildlife' &&
-        target.target.type !== 'server_wildlife') ||
-      (target.target.type === 'pen_rat' && penRatNpcs[target.target.index].attackable) ||
-      (target.target.type === 'starting_wildlife' &&
-        wildlifeNpcs[target.target.index] &&
-        wildlifeNpcs[target.target.index].attackable) ||
-      (target.target.type === 'server_wildlife' &&
-        serverWildlifeRuntime
-          .getCombatRows(gameTime)
-          .some(
-            (r, i) =>
-              i === target.target.index &&
-              r.entityId === target.target.serverEntityId &&
-              r.attackable
-          ));
-    if (canAttackTarget) {
+    if (canAttackInContextMenu(target.target)) {
       entries.push({
         label: 'Attack',
         action: () => startAttackTarget(target.target),
@@ -2681,6 +2783,7 @@ clickOverlay.addEventListener('mousedown', (e) => {
 });
 
 clickOverlay.addEventListener('mousemove', (e) => {
+  hoverTooltipText = computeHoverTooltipText(e.clientX, e.clientY);
   const rect = canvas.getBoundingClientRect();
   pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
   pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
@@ -2691,6 +2794,10 @@ clickOverlay.addEventListener('mousemove', (e) => {
     return;
   }
   if (!isDead && !isPaused && (e.buttons & 1) !== 0) setMoveTargetFromMouse(e.clientX, e.clientY);
+});
+
+clickOverlay.addEventListener('mouseleave', () => {
+  hoverTooltipText = '';
 });
 
 function updateCharacterMove(_dt: number): void {
@@ -3122,7 +3229,7 @@ const BASE_RANGED_DAMAGE = 18;
 const BASE_SWORD_DAMAGE = 12;
 
 function getMeleeDamage(): number {
-  return Math.round(BASE_SWORD_DAMAGE * (strength / 10));
+  return BASE_SWORD_DAMAGE;
 }
 
 // Player melee attack (Space): directional slash in front, cooldown
@@ -3144,9 +3251,8 @@ function performMeleeAttack(gameTime: number, targetDirection?: THREE.Vector3, h
   swordApi.performMeleeAttack(gameTime, targetDirection ?? null, state, origin);
 }
 
-/** Bow arrows: damage scaled by dexterity. */
 function getRangedDamage(): number {
-  return Math.round(BASE_RANGED_DAMAGE * (dexterity / 10));
+  return BASE_RANGED_DAMAGE;
 }
 
 // Bow: shoots at attack target when in range (equipped weapon)
@@ -4333,7 +4439,6 @@ chatInputEl.addEventListener('keydown', (e) => {
   }
 });
 
-let remotePlayersApi: ReturnType<typeof createRemotePlayers> | null = null;
 let multiplayerFirstSnap = true;
 let lastMultiplayerSentTile: GridTile | null = null;
 let lastMultiplayerSentGoal: GridTile | null = null;
@@ -4960,6 +5065,25 @@ const gameLoop = new GameLoop(
       smoothedFps += (instant - smoothedFps) * 0.08;
     }
     const camera = followCamera.three;
+    let harvestTimerVisible = false;
+    let harvestTimerProgress = 0;
+    if (
+      gatheringTargetNodeIndex !== null &&
+      !isDead &&
+      !isPaused &&
+      gatheringTargetNodeIndex >= 0 &&
+      gatheringTargetNodeIndex < GATHERING_NODE_DEFINITIONS.length
+    ) {
+      const gDef = GATHERING_NODE_DEFINITIONS[gatheringTargetNodeIndex];
+      if (gDef && areOrthogonallyAdjacent(getPlayerPathTile(), gDef.tile)) {
+        harvestTimerVisible = true;
+        const ta = tickClock.getTickAlpha();
+        harvestTimerProgress = Math.min(
+          1,
+          (gatherHarvestTickCounter + ta) / GATHERING_HARVEST_TICK_INTERVAL
+        );
+      }
+    }
     const hudState: HUDState = {
       canvasWidth: cw,
       canvasHeight: ch,
@@ -4975,10 +5099,6 @@ const gameLoop = new GameLoop(
       level,
       xp,
       xpForNextLevel: getXpForNextLevel(),
-      strength,
-      intelligence,
-      dexterity,
-      vitality,
       currentWave: waves.getCurrentWave(),
       enemyPositions,
       enemyAlive,
@@ -5004,6 +5124,10 @@ const gameLoop = new GameLoop(
       runEnergy: playerRunEnergy,
       runEnergyMax: RUN_ENERGY_MAX,
       accountUsername: useSpacetimeMp ? localStorage.getItem(SPACETIME_USERNAME_KEY) : null,
+      hoverTooltip: isDead || isPaused ? '' : hoverTooltipText,
+      harvestTimerVisible,
+      harvestTimerProgress,
+      harvestTimerAnchor: character.position,
     };
     hud.update(hudState);
     minimap.update({

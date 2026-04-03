@@ -36,10 +36,6 @@ export interface HUDState {
   level: number;
   xp: number;
   xpForNextLevel: number;
-  strength: number;
-  intelligence: number;
-  dexterity: number;
-  vitality: number;
   currentWave: number;
   enemyPositions: THREE.Vector3[];
   enemyAlive: boolean[];
@@ -67,6 +63,12 @@ export interface HUDState {
   runEnergyMax: number;
   /** Logged-in account name (SpacetimeDB); null hides the label. */
   accountUsername: string | null;
+  /** World hover hint (walk / interact); empty hides. */
+  hoverTooltip: string;
+  /** Gathering: show a tick-style bar under the player; progress 0–1 until next harvest roll. */
+  harvestTimerVisible: boolean;
+  harvestTimerProgress: number;
+  harvestTimerAnchor: THREE.Vector3;
 }
 
 export interface HUDAPI {
@@ -107,6 +109,12 @@ export function createHUD(container: HTMLElement, config: HUDConfig): HUDAPI {
   perfStack.appendChild(accountEl);
   perfStack.appendChild(fpsEl);
   perfStack.appendChild(latencyEl);
+  const hoverTooltipEl = document.createElement('div');
+  hoverTooltipEl.id = 'hud-hover-tooltip';
+  hoverTooltipEl.style.cssText =
+    'font:12px system-ui,sans-serif;color:#d8d4e0;line-height:1.35;max-width:min(340px,92vw);' +
+    'margin-top:6px;text-shadow:0 0 6px rgba(0,0,0,0.85);white-space:normal;';
+  perfStack.appendChild(hoverTooltipEl);
   container.appendChild(perfStack);
 
   const timerEl = document.createElement('div');
@@ -151,17 +159,6 @@ export function createHUD(container: HTMLElement, config: HUDConfig): HUDAPI {
   const manaFill = document.createElement('div');
   manaFill.style.cssText = `width:100%;background:linear-gradient(90deg,#3060a0,#50a0e0);${fillStyle}`;
   manaBarWrap.appendChild(manaFill);
-
-  const statsEl = document.createElement('div');
-  statsEl.style.cssText = 'display:flex;gap:12px;font:11px sans-serif;color:rgba(255,255,255,0.85);margin-top:6px;';
-  const strengthEl = document.createElement('span');
-  const intelligenceEl = document.createElement('span');
-  const dexterityEl = document.createElement('span');
-  const vitalityEl = document.createElement('span');
-  statsEl.appendChild(strengthEl);
-  statsEl.appendChild(intelligenceEl);
-  statsEl.appendChild(dexterityEl);
-  statsEl.appendChild(vitalityEl);
 
   const levelXpEl = document.createElement('div');
   levelXpEl.style.cssText = 'display:flex;flex-direction:column;gap:4px;margin-top:8px;';
@@ -209,7 +206,6 @@ export function createHUD(container: HTMLElement, config: HUDConfig): HUDAPI {
   barsEl.appendChild(healthBarWrap);
   barsEl.appendChild(manaLabel);
   barsEl.appendChild(manaBarWrap);
-  barsEl.appendChild(statsEl);
   barsEl.appendChild(levelXpEl);
   barsEl.appendChild(runEnergyLabel);
   barsEl.appendChild(runEnergyBarWrap);
@@ -252,6 +248,20 @@ export function createHUD(container: HTMLElement, config: HUDConfig): HUDAPI {
   bossHealthBarEl.fill.style.background = 'linear-gradient(90deg,#8b0000,#c03030)';
   enemyHealthBarsContainer.appendChild(bossHealthBarEl.wrap);
 
+  const HARVEST_TIMER_BAR_W = 80;
+  const HARVEST_TIMER_BAR_H = 8;
+  const harvestTimerWrap = document.createElement('div');
+  harvestTimerWrap.id = 'hud-harvest-timer';
+  harvestTimerWrap.style.cssText = `position:absolute;width:${HARVEST_TIMER_BAR_W}px;z-index:4;pointer-events:none;visibility:hidden;display:flex;flex-direction:column;align-items:center;gap:3px;`;
+  const harvestTimerTrack = document.createElement('div');
+  harvestTimerTrack.style.cssText = `position:relative;width:100%;height:${HARVEST_TIMER_BAR_H}px;background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.2);border-radius:4px;box-sizing:border-box;`;
+  const harvestTimerNeedle = document.createElement('div');
+  harvestTimerNeedle.style.cssText =
+    'position:absolute;top:0;bottom:0;width:2px;margin-left:-1px;background:rgba(120,200,140,0.95);border-radius:1px;box-shadow:0 0 6px rgba(80,180,100,0.55);left:0%;';
+  harvestTimerTrack.appendChild(harvestTimerNeedle);
+  harvestTimerWrap.appendChild(harvestTimerTrack);
+  enemyHealthBarsContainer.appendChild(harvestTimerWrap);
+
   container.appendChild(enemyHealthBarsContainer);
 
   function update(state: HUDState): void {
@@ -268,25 +278,38 @@ export function createHUD(container: HTMLElement, config: HUDConfig): HUDAPI {
     fpsEl.textContent = `${Math.round(state.smoothedFps)} FPS`;
     latencyEl.textContent =
       state.latencyMs !== null ? `${Math.round(state.latencyMs)} ms` : '— ms';
+    const ht = state.hoverTooltip;
+    if (ht) {
+      hoverTooltipEl.style.display = '';
+      hoverTooltipEl.textContent = ht;
+    } else {
+      hoverTooltipEl.style.display = 'none';
+    }
     timerEl.textContent = `Time: ${formatTime(state.runTime)}`;
 
     const a = Math.min(1, Math.max(0, state.tickAlpha));
     tickNeedle.style.left = `${a * 100}%`;
+
+    if (state.harvestTimerVisible) {
+      const anchor = state.harvestTimerAnchor;
+      projectionVec.set(anchor.x, anchor.y, anchor.z);
+      projectionVec.project(camera);
+      const px = (projectionVec.x * 0.5 + 0.5) * cw;
+      const py = (1 - (projectionVec.y * 0.5 + 0.5)) * ch;
+      const prog = Math.min(1, Math.max(0, state.harvestTimerProgress));
+      harvestTimerNeedle.style.left = `${prog * 100}%`;
+      harvestTimerWrap.style.left = `${px - HARVEST_TIMER_BAR_W / 2}px`;
+      harvestTimerWrap.style.top = `${py + 14}px`;
+      harvestTimerWrap.style.visibility = 'visible';
+    } else {
+      harvestTimerWrap.style.visibility = 'hidden';
+    }
 
     healthBarWrap.title = `${state.health} / ${state.maxHealth}`;
     healthFill.style.width = `${state.maxHealth > 0 ? (state.health / state.maxHealth) * 100 : 0}%`;
 
     manaBarWrap.title = `${state.mana} / ${state.maxMana}`;
     manaFill.style.width = `${state.maxMana > 0 ? (state.mana / state.maxMana) * 100 : 0}%`;
-
-    strengthEl.textContent = `Str ${state.strength}`;
-    strengthEl.title = 'Melee damage';
-    intelligenceEl.textContent = `Int ${state.intelligence}`;
-    intelligenceEl.title = 'Magic damage';
-    dexterityEl.textContent = `Dex ${state.dexterity}`;
-    dexterityEl.title = 'Ranged damage';
-    vitalityEl.textContent = `Vit ${state.vitality}`;
-    vitalityEl.title = 'Max health';
 
     levelLabel.textContent = `Level ${state.level}`;
     const xpPct = state.xpForNextLevel > 0 ? (state.xp / state.xpForNextLevel) * 100 : 0;

@@ -1,6 +1,6 @@
 /**
- * Player skill levels (RuneScape-style categories): combat + gathering stats for the Skills panel.
- * Stat allocation (Str/Int/Dex/Vit) lives at the top of the Skills tab in the game menu (K).
+ * Player skill levels (RuneScape-style categories): combat + gathering for the Skills panel (K / game menu).
+ * This “Strength” is a trainable skill, not a primary attribute.
  */
 
 export type PlayerSkillId =
