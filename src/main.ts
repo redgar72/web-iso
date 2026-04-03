@@ -4585,6 +4585,17 @@ const multiplayerHandlers: MultiplayerHandlers = {
       document.getElementById('spacetime-login-overlay')?.style.setProperty('display', 'none');
     }
   },
+  onSpacetimeReducerFailed(reducerName, message) {
+    addChatMessage(`[spacetimedb] ${reducerName}: ${message}`);
+    if (
+      message.includes('Unknown NPC template') &&
+      (reducerName === 'npc_spawner_place' || reducerName === 'npc_spawner_update')
+    ) {
+      addChatMessage(
+        '[spacetimedb] Publish a module built from this repo (`cd spacetimedb && spacetime publish …`) so the server knows templates like `rat`.'
+      );
+    }
+  },
   onSpacetimeConnectError(msg) {
     console.warn('[spacetimedb] connect error:', msg);
     multiplayerSelfPublicId = null;

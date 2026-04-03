@@ -163,6 +163,20 @@ export class SpacetimeMultiplayerClient {
   }
 
   private attachRowCallbacks(conn: DbConnection): void {
+    const reportFailedReducer = (reducerName: string, ctx: ReducerEventContext): void => {
+      const st = ctx.event.status as { tag: string; value?: string };
+      if (st.tag === 'Failed') {
+        const m = String(st.value ?? 'request failed');
+        this.handlers.onSpacetimeReducerFailed?.(reducerName, m);
+      }
+    };
+    conn.reducers.onNpcSpawnerPlace((ctx) => {
+      reportFailedReducer('npc_spawner_place', ctx);
+    });
+    conn.reducers.onNpcSpawnerUpdate((ctx) => {
+      reportFailedReducer('npc_spawner_update', ctx);
+    });
+
     conn.db.player.onInsert((_ctx: EventContext, _row: PlayerRow) => {
       this.emitWelcomeIfNeeded(conn);
       this.emitSnap(conn);
@@ -350,7 +364,15 @@ export class SpacetimeMultiplayerClient {
     hpOverride: number,
     dmgOverride: number
   ): void {
-    this.conn?.reducers.npcSpawnerPlace({
+    const c = this.conn as DbConnectionWithActive | null;
+    if (c === null || !c.isActive) {
+      this.handlers.onSpacetimeReducerFailed?.(
+        'npc_spawner_place',
+        'Not connected; open SpacetimeDB session first.'
+      );
+      return;
+    }
+    c.reducers.npcSpawnerPlace({
       tx,
       tz,
       templateKey,

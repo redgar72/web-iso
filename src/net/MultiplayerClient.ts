@@ -22,6 +22,8 @@ export interface MultiplayerHandlers {
   onSpacetimeConnectError?: (message: string) => void;
   /** SpacetimeDB: row inserted into `chat_message`. */
   onSpacetimeChat?: (fromPublicId: number, text: string) => void;
+  /** SpacetimeDB: reducer finished with `Failed` (e.g. unknown template, blocked tile). */
+  onSpacetimeReducerFailed?: (reducerName: string, message: string) => void;
   /** SpacetimeDB: `server_npc` or `npc_spawner` tables changed (for authoritative wildlife). */
   onServerWildlifeDirty?: (conn: DbConnection) => void;
   /** SpacetimeDB: replicated NPC removed (death / despawn) — for client VFX / loot. */
