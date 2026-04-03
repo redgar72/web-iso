@@ -2045,7 +2045,7 @@ function setMoveTargetFromMouse(clientX: number, clientY: number): SceneClickRip
   if (useSpacetimeMp && spacetimeSessionReady) {
     const srvEid = serverWildlifeEntityFromIntersection(top);
     if (srvEid !== null && !terrainEditPanel.isOpen()) {
-      const rows = serverWildlifeRuntime.getCombatRows(tickClock.getTickAlpha());
+      const rows = serverWildlifeRuntime.getCombatRows(gameTime);
       const sidx = rows.findIndex((r) => r.entityId === srvEid);
       if (sidx >= 0) {
         clearGatheringTarget();
@@ -2107,7 +2107,7 @@ function setMoveTargetFromMouse(clientX: number, clientY: number): SceneClickRip
   }
 
   if (useSpacetimeMp && spacetimeSessionReady && !terrainEditPanel.isOpen()) {
-    const rows = serverWildlifeRuntime.getCombatRows(tickClock.getTickAlpha());
+    const rows = serverWildlifeRuntime.getCombatRows(gameTime);
     for (let si = 0; si < rows.length; si++) {
       const sr = rows[si]!;
       if (!sr.attackable) continue;
@@ -2356,7 +2356,7 @@ function resolveContextMenuTarget(clientX: number, clientY: number): ContextMenu
   if (useSpacetimeMp && spacetimeSessionReady) {
     const se = serverWildlifeEntityFromIntersection(top);
     if (se !== null) {
-      const rows = serverWildlifeRuntime.getCombatRows(tickClock.getTickAlpha());
+      const rows = serverWildlifeRuntime.getCombatRows(gameTime);
       const ix = rows.findIndex((r) => r.entityId === se);
       if (ix >= 0) {
         return { kind: 'attackable', target: { type: 'server_wildlife', index: ix, serverEntityId: se } };
@@ -2395,7 +2395,7 @@ function resolveContextMenuTarget(clientX: number, clientY: number): ContextMenu
   }
 
   if (useSpacetimeMp && spacetimeSessionReady) {
-    const ctxRows = serverWildlifeRuntime.getCombatRows(tickClock.getTickAlpha());
+    const ctxRows = serverWildlifeRuntime.getCombatRows(gameTime);
     for (let ci = 0; ci < ctxRows.length; ci++) {
       const cr = ctxRows[ci]!;
       if (groundPoint.distanceTo(cr.position) <= clickRadius + cr.hitRadius) {
@@ -2590,7 +2590,7 @@ function examineAttackable(target: AttackTarget): void {
     return;
   }
   if (target.type === 'server_wildlife') {
-    const rows = serverWildlifeRuntime.getCombatRows(tickClock.getTickAlpha());
+    const rows = serverWildlifeRuntime.getCombatRows(gameTime);
     const row = rows[target.index];
     const k = row?.templateKey === 'bear' ? 'bear' : 'spider';
     addChatMessage(
@@ -2787,7 +2787,7 @@ function openGameContextMenu(clientX: number, clientY: number): void {
         wildlifeNpcs[target.target.index].attackable) ||
       (target.target.type === 'server_wildlife' &&
         serverWildlifeRuntime
-          .getCombatRows(tickClock.getTickAlpha())
+          .getCombatRows(gameTime)
           .some(
             (r, i) =>
               i === target.target.index &&
@@ -2951,7 +2951,7 @@ function updatePlayerCollisions(dt: number): void {
   }
 
   if (useSpacetimeMp && spacetimeSessionReady) {
-    for (const row of serverWildlifeRuntime.getCombatRows(tickClock.getTickAlpha())) {
+    for (const row of serverWildlifeRuntime.getCombatRows(gameTime)) {
       const toW = new THREE.Vector3().subVectors(charPos, row.position);
       const dist = toW.length();
       const minDist = PLAYER_COLLISION_RADIUS + row.hitRadius;
@@ -3104,7 +3104,7 @@ function updateAutoAttack(dt: number, gameTime: number): void {
     targetPos = pr.position;
     isAlive = pr.alive;
   } else if (attackTarget.type === 'server_wildlife') {
-    const rows = serverWildlifeRuntime.getCombatRows(tickClock.getTickAlpha());
+    const rows = serverWildlifeRuntime.getCombatRows(gameTime);
     const row = rows[attackTarget.index];
     if (!row || row.entityId !== attackTarget.serverEntityId) {
       attackTarget = null;
@@ -3154,7 +3154,7 @@ function updateAutoAttack(dt: number, gameTime: number): void {
   } else if (attackTarget.type === 'starting_wildlife') {
     effectiveMeleeRange = wildlifeNpcs[attackTarget.index]!.collisionRadius + MELEE_RANGE;
   } else if (attackTarget.type === 'server_wildlife') {
-    const rows = serverWildlifeRuntime.getCombatRows(tickClock.getTickAlpha());
+    const rows = serverWildlifeRuntime.getCombatRows(gameTime);
     const row = rows[attackTarget.index];
     effectiveMeleeRange = (row?.hitRadius ?? MELEE_RANGE) + MELEE_RANGE;
   }
@@ -3186,7 +3186,7 @@ function updateAutoAttack(dt: number, gameTime: number): void {
     ) {
       attackTarget = null;
     } else if (attackTarget.type === 'server_wildlife') {
-      const rows = serverWildlifeRuntime.getCombatRows(tickClock.getTickAlpha());
+      const rows = serverWildlifeRuntime.getCombatRows(gameTime);
       const row = rows[attackTarget.index];
       if (!row || row.entityId !== attackTarget.serverEntityId) {
         attackTarget = null;
@@ -3256,7 +3256,7 @@ function getTargetPosition(): THREE.Vector3 | null {
     return wn.position.clone();
   }
   if (attackTarget.type === 'server_wildlife') {
-    const rows = serverWildlifeRuntime.getCombatRows(tickClock.getTickAlpha());
+    const rows = serverWildlifeRuntime.getCombatRows(gameTime);
     const row = rows[attackTarget.index];
     if (!row || row.entityId !== attackTarget.serverEntityId) return null;
     return row.position.clone();
@@ -3656,9 +3656,8 @@ const waves = createWaves({
 
 // Combat state snapshot for Sword and Projectiles (built each frame)
 function buildCombatState(): CombatState {
-  const alpha = tickClock.getTickAlpha();
   const serverRows =
-    useSpacetimeMp && spacetimeSessionReady ? serverWildlifeRuntime.getCombatRows(alpha) : null;
+    useSpacetimeMp && spacetimeSessionReady ? serverWildlifeRuntime.getCombatRows(gameTime) : null;
   return {
     enemyPositions,
     enemyAlive,
@@ -3694,7 +3693,7 @@ function buildCombatState(): CombatState {
 
 function damageWildlifeUnified(index: number, amount: number): boolean {
   if (useSpacetimeMp && spacetimeSessionReady) {
-    const rows = serverWildlifeRuntime.getCombatRows(tickClock.getTickAlpha());
+    const rows = serverWildlifeRuntime.getCombatRows(gameTime);
     const row = rows[index];
     if (!row) return false;
     hitMarkers.createPlayerHitMarker(row.position.clone(), amount);
@@ -4486,7 +4485,7 @@ function processGameTick(): void {
     }
 
     if (useSpacetimeMp && spacetimeSessionReady) {
-      const rows = serverWildlifeRuntime.getCombatRows(tickClock.getTickAlpha());
+      const rows = serverWildlifeRuntime.getCombatRows(gameTime);
       for (const row of rows) {
         const tile = serverWildlifeRuntime.getLogicalTile(row.entityId);
         if (!tile) continue;
@@ -4627,7 +4626,7 @@ const multiplayerHandlers: MultiplayerHandlers = {
     chunkTerrainLoader.ingestMultiplayerTerrainChunk(chunkKeyStr, json);
   },
   onServerWildlifeDirty(conn: DbConnection) {
-    serverWildlifeRuntime.refreshFromConnection(conn);
+    serverWildlifeRuntime.refreshFromConnection(conn, gameTime);
   },
   onServerNpcDeleted({ entityId, templateKey, tx, tz }) {
     addXp(templateKey === 'spider' ? XP_SPIDER : XP_BEAR);

@@ -5,6 +5,7 @@ import type { DbConnection } from '../net/stdb';
 import NpcSpawnerTbl from '../net/stdb/npc_spawner_table';
 import ServerNpcTbl from '../net/stdb/server_npc_table';
 import { BEAR_SIZE, SPIDER_SIZE } from './StartingAreaWildlife';
+import { OSRS_TICK_SECONDS } from '../../shared/tick';
 import { tileCenterXZ } from '../world/TilePathfinding';
 import {
   wildlifeKindFromTemplateKey,
@@ -39,15 +40,23 @@ interface InterpState {
   visFrom: THREE.Vector3;
   visTo: THREE.Vector3;
   lastTile: { x: number; z: number };
+  /** Interpolation 0→1 uses {@link refreshFromConnection} gameTime elapsed since last replicated tile. */
+  stepStartGameTime: number;
   lurchStartGameTime: number;
 }
 
 export interface ServerWildlifeRuntimeApi {
   liveRoot: THREE.Group;
   spawnerGhostRoot: THREE.Group;
-  refreshFromConnection(conn: DbConnection): void;
-  updateVisuals(tickAlpha: number, terrainEditorOpen: boolean, gameTime: number): void;
-  getCombatRows(tickAlpha: number): ServerWildlifeCombatRow[];
+  /**
+   * Sync meshes + interpolation targets from DB. Pass the same `gameTime` as
+   * {@link updateVisuals} so motion interpolates over one OSRS server-tick duration without
+   * snapping when the local game tick clock rolls over.
+   */
+  refreshFromConnection(conn: DbConnection, gameTime: number): void;
+  /** @param _tickAlpha unused for server wildlife positions (kept for call-site compatibility). */
+  updateVisuals(_tickAlpha: number, terrainEditorOpen: boolean, gameTime: number): void;
+  getCombatRows(gameTime: number): ServerWildlifeCombatRow[];
   /** Stable sorted entity ids (matches combat row index). */
   getSortedEntityIds(): bigint[];
   /** Last replicated spawner rows (after {@link refreshFromConnection}). */
@@ -80,7 +89,17 @@ export function createServerWildlifeRuntime(): ServerWildlifeRuntimeApi {
     return sampleGround(wx, wz) + half;
   }
 
-  function ensureInterp(idStr: string, tx: number, tz: number, tpl: string): InterpState {
+  function tileCoord(v: unknown): number {
+    return typeof v === 'bigint' ? Number(v) : Math.floor(Number(v));
+  }
+
+  function tilesEqual(a: { x: number; z: number }, tx: number, tz: number): boolean {
+    return a.x === tx && a.z === tz;
+  }
+
+  function ensureInterp(idStr: string, txRaw: unknown, tzRaw: unknown, tpl: string, gameTime: number): InterpState {
+    const tx = tileCoord(txRaw);
+    const tz = tileCoord(tzRaw);
     let s = interp.get(idStr);
     const c = tileCenterXZ({ x: tx, z: tz });
     const y = meshYForTemplate(tpl, c.x, c.z);
@@ -89,15 +108,22 @@ export function createServerWildlifeRuntime(): ServerWildlifeRuntimeApi {
         visFrom: new THREE.Vector3(c.x, y, c.z),
         visTo: new THREE.Vector3(c.x, y, c.z),
         lastTile: { x: tx, z: tz },
+        stepStartGameTime: gameTime,
         lurchStartGameTime: -1,
       };
       interp.set(idStr, s);
       return s;
     }
-    if (s.lastTile.x !== tx || s.lastTile.z !== tz) {
-      s.visFrom.copy(s.visTo);
+    if (!tilesEqual(s.lastTile, tx, tz)) {
+      const mesh = npcMeshes.get(idStr);
+      if (mesh) s.visFrom.copy(mesh.position);
+      else {
+        const a = THREE.MathUtils.clamp((gameTime - s.stepStartGameTime) / OSRS_TICK_SECONDS, 0, 1);
+        s.visFrom.lerpVectors(s.visFrom, s.visTo, a);
+      }
       s.visTo.set(c.x, y, c.z);
       s.lastTile = { x: tx, z: tz };
+      s.stepStartGameTime = gameTime;
     }
     s.visTo.y = y;
     return s;
@@ -134,7 +160,7 @@ export function createServerWildlifeRuntime(): ServerWildlifeRuntimeApi {
     }
   }
 
-  function refreshFromConnection(conn: DbConnection): void {
+  function refreshFromConnection(conn: DbConnection, gameTime: number): void {
     const rows = [...conn.db.serverNpc.iter()].sort((a, b) => (asU64(a.id) < asU64(b.id) ? -1 : 1));
     const seen = new Set<string>();
     rowByEntityId.clear();
@@ -157,16 +183,19 @@ export function createServerWildlifeRuntime(): ServerWildlifeRuntimeApi {
         });
         liveRoot.add(mesh);
         npcMeshes.set(idStr, mesh);
-        const t = tileCenterXZ({ x: row.tx as number, z: row.tz as number });
+        const tx = tileCoord(row.tx);
+        const tz = tileCoord(row.tz);
+        const t = tileCenterXZ({ x: tx, z: tz });
         const y = meshYForTemplate(tpl, t.x, t.z);
         interp.set(idStr, {
           visFrom: new THREE.Vector3(t.x, y, t.z),
           visTo: new THREE.Vector3(t.x, y, t.z),
-          lastTile: { x: row.tx as number, z: row.tz as number },
+          lastTile: { x: tx, z: tz },
+          stepStartGameTime: gameTime,
           lurchStartGameTime: -1,
         });
       }
-      ensureInterp(idStr, row.tx as number, row.tz as number, tpl);
+      ensureInterp(idStr, row.tx, row.tz, tpl, gameTime);
     }
 
     for (const [idStr, mesh] of npcMeshes) {
@@ -180,7 +209,7 @@ export function createServerWildlifeRuntime(): ServerWildlifeRuntimeApi {
     syncSpawnerGhosts(conn);
   }
 
-  function updateVisuals(tickAlpha: number, terrainEditorOpen: boolean, gameTime: number): void {
+  function updateVisuals(_tickAlpha: number, terrainEditorOpen: boolean, gameTime: number): void {
     const hideLive = terrainEditorOpen;
     liveRoot.visible = !hideLive;
     spawnerGhostRoot.visible = terrainEditorOpen;
@@ -194,7 +223,7 @@ export function createServerWildlifeRuntime(): ServerWildlifeRuntimeApi {
     for (const [idStr, mesh] of npcMeshes) {
       const s = interp.get(idStr);
       if (!s) continue;
-      const a = THREE.MathUtils.clamp(tickAlpha, 0, 1);
+      const a = THREE.MathUtils.clamp((gameTime - s.stepStartGameTime) / OSRS_TICK_SECONDS, 0, 1);
       let lx = THREE.MathUtils.lerp(s.visFrom.x, s.visTo.x, a);
       let ly = THREE.MathUtils.lerp(s.visFrom.y, s.visTo.y, a);
       let lz = THREE.MathUtils.lerp(s.visFrom.z, s.visTo.z, a);
@@ -214,8 +243,7 @@ export function createServerWildlifeRuntime(): ServerWildlifeRuntimeApi {
     }
   }
 
-  function getCombatRows(tickAlpha: number): ServerWildlifeCombatRow[] {
-    const a = THREE.MathUtils.clamp(tickAlpha, 0, 1);
+  function getCombatRows(gameTime: number): ServerWildlifeCombatRow[] {
     const out: ServerWildlifeCombatRow[] = [];
     const ids = sortedEntityIds();
     for (const eid of ids) {
@@ -224,7 +252,10 @@ export function createServerWildlifeRuntime(): ServerWildlifeRuntimeApi {
       if (!row) continue;
       const tpl = String(row.templateKey);
       const s = interp.get(idStr);
-      const t = tileCenterXZ({ x: row.tx as number, z: row.tz as number });
+      const t = tileCenterXZ({ x: tileCoord(row.tx), z: tileCoord(row.tz) });
+      const a = s
+        ? THREE.MathUtils.clamp((gameTime - s.stepStartGameTime) / OSRS_TICK_SECONDS, 0, 1)
+        : 0;
       const pos = s
         ? new THREE.Vector3().lerpVectors(s.visFrom, s.visTo, a)
         : new THREE.Vector3(t.x, meshYForTemplate(tpl, t.x, t.z), t.z);
