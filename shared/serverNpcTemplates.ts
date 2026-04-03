@@ -1,6 +1,6 @@
 /** Template keys for server-authoritative wildlife / NPC spawners. Keep in sync with DB `templateKey`. */
 
-export const SERVER_NPC_TEMPLATE_KEYS = ['spider', 'bear'] as const;
+export const SERVER_NPC_TEMPLATE_KEYS = ['spider', 'rat', 'bear'] as const;
 export type ServerNpcTemplateKey = (typeof SERVER_NPC_TEMPLATE_KEYS)[number];
 
 export function isServerNpcTemplateKey(s: string): s is ServerNpcTemplateKey {
@@ -32,8 +32,18 @@ const BEAR: ServerNpcTemplate = {
   collisionRadius: 0.78 * 0.45,
 };
 
+/** Matches former static pen-rat stats (`PEN_RAT_*` in client). */
+const RAT: ServerNpcTemplate = {
+  maxHp: 14,
+  biteDamage: 4,
+  biteIntervalTicks: 3,
+  aggroTiles: 8,
+  collisionRadius: 0.42 * 0.45,
+};
+
 export function getServerNpcTemplate(key: string): ServerNpcTemplate {
   if (key === 'bear') return BEAR;
+  if (key === 'rat') return RAT;
   return SPIDER;
 }
 

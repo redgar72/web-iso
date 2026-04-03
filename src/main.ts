@@ -3393,6 +3393,12 @@ function spawnStartingWildlifeLoot(index: number, pos: THREE.Vector3): void {
   trySpawnDrop(pos.clone(), wildlifeKindAt(index) === 'spider' ? 'spider' : 'bear');
 }
 
+function serverWildlifeTemplateDropType(templateKey: string): MonsterType {
+  if (templateKey === 'bear') return 'bear';
+  if (templateKey === 'rat') return 'rat';
+  return 'spider';
+}
+
 function spawnServerWildlifeLootAt(templateKey: string, pos: THREE.Vector3): void {
   const scatter = (spread: number) => {
     const p = pos.clone();
@@ -3405,7 +3411,7 @@ function spawnServerWildlifeLootAt(templateKey: string, pos: THREE.Vector3): voi
   if (templateKey === 'bear') {
     groundItemsApi.spawn(scatter(0.45), 'raw_meat');
   }
-  trySpawnDrop(pos.clone(), templateKey === 'spider' ? 'spider' : 'bear');
+  trySpawnDrop(pos.clone(), serverWildlifeTemplateDropType(templateKey));
 }
 
 /** Returns true if the mob died. */
@@ -4629,7 +4635,9 @@ const multiplayerHandlers: MultiplayerHandlers = {
     serverWildlifeRuntime.refreshFromConnection(conn, gameTime);
   },
   onServerNpcDeleted({ entityId, templateKey, tx, tz }) {
-    addXp(templateKey === 'spider' ? XP_SPIDER : XP_BEAR);
+    addXp(
+      templateKey === 'bear' ? XP_BEAR : templateKey === 'rat' ? XP_PEN_RAT : XP_SPIDER
+    );
     const p = tileCenterXZ({ x: tx, z: tz });
     spawnServerWildlifeLootAt(templateKey, new THREE.Vector3(p.x, 0.2, p.z));
     if (

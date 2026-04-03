@@ -7,6 +7,7 @@ import {
   BEAR_SIZE,
   type StartingWildlifeKind,
 } from '../StartingAreaWildlife';
+import { createRatMobGroup } from './PenRatMeshes';
 
 const USERDATA_KEY = 'startingWildlifeIndex';
 
@@ -16,12 +17,15 @@ export const SERVER_NPC_ENTITY_KEY = 'serverNpcEntityId';
 export const NPC_SPAWNER_KEY = 'npcSpawnerId';
 
 export function wildlifeKindFromTemplateKey(key: string): StartingWildlifeKind {
-  return key === 'bear' ? 'bear' : 'spider';
+  if (key === 'bear') return 'bear';
+  if (key === 'rat') return 'rat';
+  return 'spider';
 }
 
 /** One mob mesh for dynamic / replicated NPCs (not wired to legacy slot index userdata). */
 export function createWildlifeMobGroupForTemplate(templateKey: string): THREE.Group {
   const kind = wildlifeKindFromTemplateKey(templateKey);
+  if (kind === 'rat') return createRatMobGroup();
   if (kind === 'spider') {
     const spiderMat = new THREE.MeshStandardMaterial({ color: 0x262018, roughness: 0.92 });
     const spiderEyeMat = new THREE.MeshStandardMaterial({ color: 0x0a0a06, roughness: 0.4 });

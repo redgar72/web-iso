@@ -1,18 +1,9 @@
 import * as THREE from 'three';
 import type { GridTile } from '../world/TilePathfinding';
 import { tileCenterXZ } from '../world/TilePathfinding';
-import { PEN_RAT_COUNT } from './PenRats';
 import { STARTING_WILDLIFE_COUNT, STARTING_WILDLIFE_INITIAL_TILES } from './StartingAreaWildlife';
 import { createPenRatNpcs, createWildlifeNpcs, type PenRatNpc, type WildlifeNpc } from './npc';
 import { createPenRatGroup, createStartingWildlifeGroup, createEnemies } from './meshes';
-
-/** Starting tiles for pen rats (pathfinding demo pen). */
-export const PEN_RAT_INITIAL_TILES: GridTile[] = [
-  { x: 18, z: 5 },
-  { x: 19, z: 5 },
-  { x: 17, z: 6 },
-  { x: 19, z: 6 },
-];
 
 export interface NpcSceneBundle {
   penRatNpcs: PenRatNpc[];
@@ -41,14 +32,6 @@ export function createNpcSceneContent(options?: NpcSceneContentOptions): NpcScen
   const wildlifeNpcs = legacy ? createWildlifeNpcs() : [];
   const startingWildlifeGroup = legacy ? createStartingWildlifeGroup() : new THREE.Group();
   const enemies = createEnemies();
-
-  for (let ri = 0; ri < PEN_RAT_COUNT; ri++) {
-    const tile = PEN_RAT_INITIAL_TILES[ri] ?? { x: 18, z: 5 };
-    penRatNpcs[ri].placeAtTile(tile);
-    const c = tileCenterXZ(tile);
-    const rat = penRatGroup.children[ri] as THREE.Group;
-    if (rat) rat.position.set(c.x, 0, c.z);
-  }
 
   if (legacy) {
     for (let wi = 0; wi < STARTING_WILDLIFE_COUNT; wi++) {

@@ -4,7 +4,14 @@
 
 export type DropType = 'mana' | 'coin' | null;
 
-export type MonsterType = 'redCube' | 'caster' | 'resurrector' | 'teleporter' | 'spider' | 'bear';
+export type MonsterType =
+  | 'redCube'
+  | 'caster'
+  | 'resurrector'
+  | 'teleporter'
+  | 'spider'
+  | 'rat'
+  | 'bear';
 
 interface DropEntry {
   chance: number;
@@ -34,6 +41,11 @@ const DROP_TABLES: Record<MonsterType, DropEntry[]> = {
     { chance: 0.14, drop: 'coin' },
   ],
   spider: [
+    { chance: 0.55, drop: null },
+    { chance: 0.22, drop: 'coin' },
+    { chance: 0.23, drop: 'mana' },
+  ],
+  rat: [
     { chance: 0.55, drop: null },
     { chance: 0.22, drop: 'coin' },
     { chance: 0.23, drop: 'mana' },

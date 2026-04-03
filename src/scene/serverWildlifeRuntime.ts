@@ -5,6 +5,7 @@ import type { DbConnection } from '../net/stdb';
 import NpcSpawnerTbl from '../net/stdb/npc_spawner_table';
 import ServerNpcTbl from '../net/stdb/server_npc_table';
 import { BEAR_SIZE, SPIDER_SIZE } from './StartingAreaWildlife';
+import { PEN_RAT_SIZE } from './PenRats';
 import { OSRS_TICK_SECONDS } from '../../shared/tick';
 import { tileCenterXZ } from '../world/TilePathfinding';
 import {
@@ -83,10 +84,15 @@ export function createServerWildlifeRuntime(): ServerWildlifeRuntimeApi {
 
   let sampleGround: (wx: number, wz: number) => number = () => 0;
 
-  function meshYForTemplate(templateKey: string, wx: number, wz: number): number {
+  function meshHalfHeightForTemplateKey(templateKey: string): number {
     const kind = wildlifeKindFromTemplateKey(templateKey);
-    const half = kind === 'bear' ? BEAR_SIZE / 2 : SPIDER_SIZE / 2;
-    return sampleGround(wx, wz) + half;
+    if (kind === 'bear') return BEAR_SIZE / 2;
+    if (kind === 'rat') return PEN_RAT_SIZE / 2;
+    return SPIDER_SIZE / 2;
+  }
+
+  function meshYForTemplate(templateKey: string, wx: number, wz: number): number {
+    return sampleGround(wx, wz) + meshHalfHeightForTemplateKey(templateKey);
   }
 
   function tileCoord(v: unknown): number {
@@ -267,7 +273,7 @@ export function createServerWildlifeRuntime(): ServerWildlifeRuntimeApi {
         alive: true,
         attackable: true,
         hitRadius: tmpl.collisionRadius,
-        meshBaseY: wildlifeKindFromTemplateKey(tpl) === 'bear' ? BEAR_SIZE / 2 : SPIDER_SIZE / 2,
+        meshBaseY: meshHalfHeightForTemplateKey(tpl),
         biteDamage: row.biteDamage as number,
         biteIntervalTicks: tmpl.biteIntervalTicks,
         aggroTiles: tmpl.aggroTiles,
