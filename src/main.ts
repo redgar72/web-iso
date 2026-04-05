@@ -31,6 +31,18 @@ import {
   GATHERING_SUCCESS_CHANCE,
   pickGatheringReward,
 } from './world/GatheringNodes';
+import {
+  createFriendlyNpcsRoot,
+  FRIENDLY_NPC_DEFINITIONS,
+  friendlyNpcClickExtraRadius,
+  friendlyNpcExamineLine,
+  friendlyNpcIndexFromIntersection,
+  friendlyNpcTileNavExceptions,
+} from './world/FriendlyNpcs';
+import { NPC_DISPLAY_NAMES } from './npc/NpcIds';
+import { npcStateStore } from './npc/NpcStateStore';
+import { createDialogSession, type DialogSession } from './npc/dialogSession';
+import { createDialogPanel } from './ui/DialogPanel';
 import { createIsoLights } from './scene/IsoLights';
 import { buildTerrainFollowingGridGeometry } from './scene/terrainDebugGrid';
 import { buildWaterTileIndicatorGeometry } from './scene/waterTileIndicators';
@@ -1050,6 +1062,7 @@ const pathfindingDemoPenRoot = new THREE.Group();
 function syncPathfindingDemoTileNav(): void {
   replaceTileNavExceptions([
     ...gatheringTileNavExceptions(),
+    ...friendlyNpcTileNavExceptions(),
     ...pathfindingDemoPenNavExceptions(pathfindingDemoGateOpen),
     ...chunkTerrainLoader.getWaterTileNavExceptions(),
   ]);
@@ -1219,6 +1232,54 @@ scene.add(trainingDummyGroup);
 
 const gatheringNodesRoot = createGatheringNodesRoot();
 scene.add(gatheringNodesRoot);
+
+const friendlyNpcsRoot = createFriendlyNpcsRoot();
+scene.add(friendlyNpcsRoot);
+
+const dialogPanel = createDialogPanel(container);
+let activeDialogSession: DialogSession | null = null;
+
+function closeFriendlyNpcDialog(): void {
+  activeDialogSession = null;
+  dialogPanel.close();
+}
+
+function bindDialogHandlers(session: DialogSession, title: string) {
+  return {
+    onOption: (idx: number) => {
+      const stay = session.chooseOption(idx);
+      if (!stay) {
+        closeFriendlyNpcDialog();
+        return;
+      }
+      const line = session.getLine();
+      if (!line) {
+        closeFriendlyNpcDialog();
+        return;
+      }
+      dialogPanel.showLine(title, line, bindDialogHandlers(session, title));
+    },
+    onClose: () => {
+      closeFriendlyNpcDialog();
+    },
+  };
+}
+
+function openFriendlyNpcDialog(instanceIndex: number): void {
+  if (isDead || isPaused) return;
+  const def = FRIENDLY_NPC_DEFINITIONS[instanceIndex];
+  if (!def) return;
+  const session = createDialogSession(def.npcId, npcStateStore);
+  if (!session) return;
+  activeDialogSession = session;
+  const title = NPC_DISPLAY_NAMES[def.npcId];
+  const line = session.getLine();
+  if (!line) {
+    activeDialogSession = null;
+    return;
+  }
+  dialogPanel.open(title, line, bindDialogHandlers(session, title));
+}
 
 const lastEnemyDamageTime: number[] = Array(ENEMY_COUNT).fill(-999);
 
@@ -1486,6 +1547,7 @@ function clearTileMovementOnly(): void {
 function clearTileMovement(): void {
   clearTileMovementOnly();
   pendingGroundPickupId = null;
+  clearFriendlyNpcWalkTarget();
 }
 
 /** Tile the player officially occupies: path step until a leg finishes, not world position mid-lerp. */
@@ -1651,6 +1713,12 @@ interface AttackTarget {
 let attackTarget: AttackTarget | null = null;
 let gatheringTargetNodeIndex: number | null = null;
 let gatherHarvestTickCounter = 0;
+/** When set, opening dialog is deferred until the player stands orthogonally adjacent to this NPC tile. */
+let friendlyNpcWalkToIndex: number | null = null;
+
+function clearFriendlyNpcWalkTarget(): void {
+  friendlyNpcWalkToIndex = null;
+}
 
 function clearGatheringTarget(): void {
   gatheringTargetNodeIndex = null;
@@ -1681,6 +1749,7 @@ function mergePickIntersections(ray: THREE.Raycaster): THREE.Intersection[] {
     penRatGroup,
     startingWildlifeGroup,
     gatheringNodesRoot,
+    friendlyNpcsRoot,
     groundItemsApi.getGroup(),
   ];
   if (useSpacetimeMp) {
@@ -1703,6 +1772,8 @@ function maybeCompletePendingPathfindingGateAction(): void {
 function handlePathfindingPenBarrierClick(): void {
   attackTarget = null;
   pendingGroundPickupId = null;
+  clearGatheringTarget();
+  clearFriendlyNpcWalkTarget();
   const pt = getPlayerPathTile();
   if (pathfindingDemoGateOpen) {
     if (areOrthogonallyAdjacent(pt, PATHFINDING_DEMO_GATE_TILE)) {
@@ -1751,6 +1822,7 @@ function pathToClosestOrthTileTowardDummy(): void {
 
 function pathToClosestOrthTileTowardGatheringNode(nodeIndex: number): void {
   pendingGroundPickupId = null;
+  clearFriendlyNpcWalkTarget();
   const def = GATHERING_NODE_DEFINITIONS[nodeIndex];
   if (!def) return;
   const adj = findClosestReachableOrthAdjacentStandTile(getPlayerPathTile(), def.tile);
@@ -1768,6 +1840,45 @@ function pathToClosestOrthTileTowardGatheringNode(nodeIndex: number): void {
   } else {
     beginTilePathToWorldGoal(c.x, c.z);
   }
+}
+
+function pathToClosestOrthTileTowardFriendlyNpc(instanceIndex: number): void {
+  pendingGroundPickupId = null;
+  clearGatheringTarget();
+  const def = FRIENDLY_NPC_DEFINITIONS[instanceIndex];
+  if (!def) {
+    clearFriendlyNpcWalkTarget();
+    return;
+  }
+  const adj = findClosestReachableOrthAdjacentStandTile(getPlayerPathTile(), def.tile);
+  if (adj === null) {
+    addChatMessage("You can't reach them from here.");
+    clearFriendlyNpcWalkTarget();
+    return;
+  }
+  const c = tileCenterXZ(adj);
+  if (tilePath !== null) {
+    pendingWorldGoal = { x: c.x, z: c.z };
+    moveGoalTile = { x: adj.x, z: adj.z };
+    const tc = tileCenterXZ(moveGoalTile);
+    moveTargetTileMarker.position.set(tc.x, moveTargetTileMarker.position.y, tc.z);
+    moveTargetTileMarker.visible = true;
+  } else {
+    beginTilePathToWorldGoal(c.x, c.z);
+  }
+}
+
+function tryOpenPendingFriendlyNpcDialog(): void {
+  if (friendlyNpcWalkToIndex === null || isDead || isPaused) return;
+  const idx = friendlyNpcWalkToIndex;
+  const def = FRIENDLY_NPC_DEFINITIONS[idx];
+  if (!def) {
+    friendlyNpcWalkToIndex = null;
+    return;
+  }
+  if (!areOrthogonallyAdjacent(getPlayerPathTile(), def.tile)) return;
+  friendlyNpcWalkToIndex = null;
+  openFriendlyNpcDialog(idx);
 }
 
 /** True when our true tile is orthogonally adjacent to the dummy (combat range), including mid-path lerp. */
@@ -1841,8 +1952,39 @@ function setMoveTargetFromMouse(clientX: number, clientY: number): SceneClickRip
     return 'interact';
   }
 
+  const fnPickIdx = friendlyNpcIndexFromIntersection(top);
+  if (fnPickIdx !== null && FRIENDLY_NPC_DEFINITIONS[fnPickIdx]) {
+    attackTarget = null;
+    const fnTile = FRIENDLY_NPC_DEFINITIONS[fnPickIdx]!.tile;
+    if (areOrthogonallyAdjacent(getPlayerPathTile(), fnTile)) {
+      clearFriendlyNpcWalkTarget();
+      openFriendlyNpcDialog(fnPickIdx);
+      return 'interact';
+    }
+    friendlyNpcWalkToIndex = fnPickIdx;
+    pathToClosestOrthTileTowardFriendlyNpc(fnPickIdx);
+    return 'interact';
+  }
+
   const groundPoint = top.point;
   const clickRadius = 1.5; // How close to a monster's position counts as clicking it
+  const fnExtra = friendlyNpcClickExtraRadius();
+
+  for (let fi = 0; fi < FRIENDLY_NPC_DEFINITIONS.length; fi++) {
+    const fDef = FRIENDLY_NPC_DEFINITIONS[fi]!;
+    const fc = tileCenterXZ(fDef.tile);
+    if (Math.hypot(groundPoint.x - fc.x, groundPoint.z - fc.z) <= clickRadius + fnExtra) {
+      attackTarget = null;
+      if (areOrthogonallyAdjacent(getPlayerPathTile(), fDef.tile)) {
+        clearFriendlyNpcWalkTarget();
+        openFriendlyNpcDialog(fi);
+        return 'interact';
+      }
+      friendlyNpcWalkToIndex = fi;
+      pathToClosestOrthTileTowardFriendlyNpc(fi);
+      return 'interact';
+    }
+  }
 
   if (trainingDummyAlive) {
     const dx = groundPoint.x - trainingDummyWorldPos.x;
@@ -1960,6 +2102,7 @@ function setMoveTargetFromMouse(clientX: number, clientY: number): SceneClickRip
 function walkToGroundPoint(p: THREE.Vector3): void {
   pendingPathfindingGateAction = null;
   clearGatheringTarget();
+  clearFriendlyNpcWalkTarget();
   pendingGroundPickupId = null;
   const x = Math.max(TERRAIN_XZ_MIN, Math.min(TERRAIN_XZ_MAX, p.x));
   const z = Math.max(TERRAIN_XZ_MIN, Math.min(TERRAIN_XZ_MAX, p.z));
@@ -1985,6 +2128,7 @@ function requestWalkOrPickupGroundItem(itemId: number): void {
   }
   pendingPathfindingGateAction = null;
   clearGatheringTarget();
+  clearFriendlyNpcWalkTarget();
   attackTarget = null;
   const itemTile = worldXZToTile(goal.x, goal.z);
   const pt = getPlayerPathTile();
@@ -2013,6 +2157,7 @@ function requestWalkOrPickupGroundItem(itemId: number): void {
 
 function startAttackTarget(target: AttackTarget): void {
   clearGatheringTarget();
+  clearFriendlyNpcWalkTarget();
   attackTarget = target;
   if (target.type === 'training_dummy') {
     pathToClosestOrthTileTowardDummy();
@@ -2026,6 +2171,7 @@ type ContextMenuTarget =
   | { kind: 'gate' }
   | { kind: 'ground_item'; id: number; itemId: ItemId }
   | { kind: 'gathering'; nodeIndex: number }
+  | { kind: 'friendly_npc'; instanceIndex: number }
   | { kind: 'attackable'; target: AttackTarget }
   | { kind: 'remote_player'; peerId: number };
 
@@ -2056,6 +2202,8 @@ function contextMenuTargetDedupeKey(t: ContextMenuTarget): string {
       return `gi:${t.id}`;
     case 'gathering':
       return `gath:${t.nodeIndex}`;
+    case 'friendly_npc':
+      return `fnpc:${t.instanceIndex}`;
     case 'gate':
       return 'gate';
     case 'attackable':
@@ -2142,6 +2290,11 @@ function primaryLabelForContextTarget(t: ContextMenuTarget): string {
     }
     case 'gathering':
       return gatheringHoverLabel(t.nodeIndex);
+    case 'friendly_npc': {
+      const def = FRIENDLY_NPC_DEFINITIONS[t.instanceIndex];
+      const name = def ? NPC_DISPLAY_NAMES[def.npcId] : 'villager';
+      return hoverActionEntityLine('talk to', name);
+    }
     case 'gate':
       return pathfindingDemoGateOpen
         ? hoverActionEntityLine('close', 'gate')
@@ -2195,6 +2348,11 @@ function classifyIntersectionForContextMenu(hit: THREE.Intersection): ContextMen
   const gCtxIdx = gatheringNodeIndexFromIntersection(hit);
   if (gCtxIdx !== null) return { kind: 'gathering', nodeIndex: gCtxIdx };
 
+  const fnCtxIdx = friendlyNpcIndexFromIntersection(hit);
+  if (fnCtxIdx !== null && FRIENDLY_NPC_DEFINITIONS[fnCtxIdx]) {
+    return { kind: 'friendly_npc', instanceIndex: fnCtxIdx };
+  }
+
   return null;
 }
 
@@ -2203,6 +2361,15 @@ function pushGroundProximityContextTargets(
   push: (t: ContextMenuTarget) => void
 ): void {
   const clickRadius = 1.5;
+  const fnEx = friendlyNpcClickExtraRadius();
+
+  for (let fi = 0; fi < FRIENDLY_NPC_DEFINITIONS.length; fi++) {
+    const fDef = FRIENDLY_NPC_DEFINITIONS[fi]!;
+    const fc = tileCenterXZ(fDef.tile);
+    if (Math.hypot(groundPoint.x - fc.x, groundPoint.z - fc.z) <= clickRadius + fnEx) {
+      push({ kind: 'friendly_npc', instanceIndex: fi });
+    }
+  }
 
   if (trainingDummyAlive) {
     const dx = groundPoint.x - trainingDummyWorldPos.x;
@@ -2295,7 +2462,7 @@ function collectHoverContextTargets(clientX: number, clientY: number): ContextMe
 }
 
 function computeHoverTooltipText(clientX: number, clientY: number): string {
-  if (terrainEditPanel.isOpen() || isDead || isPaused) return '';
+  if (terrainEditPanel.isOpen() || dialogPanel.isOpen() || isDead || isPaused) return '';
   const targets = collectHoverContextTargets(clientX, clientY);
   if (targets.length === 0) return '';
   const primaryLabel = primaryLabelForContextTarget(targets[0]!);
@@ -2744,6 +2911,26 @@ function openGameContextMenu(clientX: number, clientY: number): void {
       label: 'Examine',
       action: () => addChatMessage('Another adventurer.'),
     });
+  } else if (target.kind === 'friendly_npc') {
+    const ix = target.instanceIndex;
+    const def = FRIENDLY_NPC_DEFINITIONS[ix];
+    entries.push({
+      label: 'Talk-to',
+      action: () => {
+        if (!def) return;
+        if (areOrthogonallyAdjacent(getPlayerPathTile(), def.tile)) {
+          clearFriendlyNpcWalkTarget();
+          openFriendlyNpcDialog(ix);
+          return;
+        }
+        friendlyNpcWalkToIndex = ix;
+        pathToClosestOrthTileTowardFriendlyNpc(ix);
+      },
+    });
+    entries.push({
+      label: 'Examine',
+      action: () => addChatMessage(friendlyNpcExamineLine(ix)),
+    });
   } else if (target.kind === 'attackable') {
     if (canAttackInContextMenu(target.target)) {
       entries.push({
@@ -2773,6 +2960,7 @@ document.addEventListener(
 clickOverlay.addEventListener('mousedown', (e) => {
   if (e.button !== 0) return; // left button only
   if (isDead || isPaused) return;
+  if (dialogPanel.isOpen()) return;
   if (terrainEditPanel.isOpen()) {
     terrainEditStrokeSeen.clear();
     tryTerrainEditPaint(e.clientX, e.clientY);
@@ -2793,7 +2981,9 @@ clickOverlay.addEventListener('mousemove', (e) => {
     }
     return;
   }
-  if (!isDead && !isPaused && (e.buttons & 1) !== 0) setMoveTargetFromMouse(e.clientX, e.clientY);
+  if (!isDead && !isPaused && !dialogPanel.isOpen() && (e.buttons & 1) !== 0) {
+    setMoveTargetFromMouse(e.clientX, e.clientY);
+  }
 });
 
 clickOverlay.addEventListener('mouseleave', () => {
@@ -2836,6 +3026,7 @@ function processPlayerPathTick(): void {
     maybeCompletePendingPathfindingGateAction();
     clearTileMovementOnly();
     tryConsumePendingGroundPickup();
+    tryOpenPendingFriendlyNpcDialog();
     return;
   }
 
@@ -3844,6 +4035,7 @@ function collectMinimapNpcYellow(): { x: number; z: number }[] {
 
 clickOverlay.addEventListener('contextmenu', (e) => {
   e.preventDefault();
+  if (dialogPanel.isOpen()) return;
   if (
     terrainEditPanel.isOpen() &&
     terrainEditPanel.getPrimaryTool() === 'npc_spawner' &&
@@ -3869,6 +4061,11 @@ document.addEventListener('keydown', (e) => {
       e.preventDefault();
       setChatOpen(false);
     }
+    return;
+  }
+  if (dialogPanel.isOpen() && e.key === 'Escape') {
+    e.preventDefault();
+    closeFriendlyNpcDialog();
     return;
   }
   if (e.key === 'Enter') {
